@@ -1303,8 +1303,45 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             };
             sig.update_for_func(&func);
             self.src.push_str("#[allow(unused_variables)]\n");
-            self.print_signature(func, true, &sig);
-            self.src.push_str("{ unreachable!() }\n");
+            let params = self.print_signature(func, true, &sig);
+            if self.r#gen.opts.proxy_component {
+                self.src.push_str(" {\n");
+                if func.kind.resource().is_some() {
+                    if let FunctionKind::Constructor(_) = func.kind {
+                        self.src.push_str("Stub::");
+                    } else {
+                        self.src.push_str("self.");
+                    }
+                    self.src.push_str(&to_rust_ident(func.item_name()));
+                    self.src.push_str("(");
+                    let call_params = if let FunctionKind::Constructor(_) = func.kind {
+                        &params
+                    } else {
+                        &params[1..]
+                    };
+                    self.src.push_str(&call_params.join(", "));
+                    self.src.push_str(")");
+                } else {
+                    if let Some((_, world_key)) = interface {
+                        let import_path_vec =
+                            crate::compute_module_path(world_key, self.resolve, false);
+                        self.src.push_str(&format!("{}::", &import_path_vec.join("::")));
+                    }
+                    self.src.push_str(&to_rust_ident(func.item_name()));
+                    self.src.push_str("(");
+                    self.src.push_str(&params.join(", "));
+                    self.src.push_str(")");
+                }
+                if async_ {
+                    self.src.push_str(".await");
+                }
+                if func.result.is_none() {
+                    self.src.push_str(";");
+                }
+                self.src.push_str("\n}\n");
+            } else {
+                self.src.push_str("{ unreachable!() }\n");
+            }
         }
 
         self.src.push_str("}\n");

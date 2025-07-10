@@ -425,7 +425,7 @@ impl RustWasm {
         id: InterfaceId,
         files: &mut Files,
     ) -> Result<()> {
-        // For each type in the interface, add a `with` mapping to the
+        // For each type in the interface, add a `with` mapping to reuse the
         // corresponding import type.
         let import_path = compute_module_path(name, resolve, false);
         for (type_name, ty_id) in resolve.interfaces[id].types.iter() {
@@ -440,22 +440,6 @@ impl RustWasm {
         // Now generate the export. This will use the `with` mappings to avoid
         // generating new types.
         self.export_interface(resolve, name, id, files)?;
-
-        /*
-        // Now generate the `impl` for the `Guest` trait.
-        let wasm_import_module = format!("[export]{}", resolve.name_world_key(name));
-        let mut gen = self.interface(
-            Identifier::Interface(id, name),
-            &wasm_import_module,
-            resolve,
-            false, // is_import
-        );
-
-        let funcs = resolve.interfaces[id].functions.values();
-        gen.generate_proxy(Some((id, name)), funcs);
-        let proxy_impl = gen.finish();
-        self.src.push_str(&proxy_impl);
-        */
         Ok(())
     }
 
