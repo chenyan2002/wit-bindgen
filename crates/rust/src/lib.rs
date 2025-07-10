@@ -270,6 +270,10 @@ pub struct Opts {
     #[cfg_attr(feature = "clap", arg(long))]
     pub disable_custom_section_link_helpers: bool,
 
+    /// Whether or not to generate a `proxy_component`. Generate import for now.
+    #[cfg_attr(feature = "clap", clap(long))]
+    pub proxy_component: bool,
+
     #[cfg_attr(feature = "clap", clap(flatten))]
     #[cfg_attr(feature = "serde", serde(flatten))]
     pub async_: AsyncFilterSet,
@@ -412,6 +416,47 @@ impl RustWasm {
         self.interface_names.insert(id, entry);
 
         Ok(remapped)
+    }
+
+    fn proxy_interface(
+        &mut self,
+        resolve: &Resolve,
+        name: &WorldKey,
+        id: InterfaceId,
+        files: &mut Files,
+    ) -> Result<()> {
+        // For each type in the interface, add a `with` mapping to the
+        // corresponding import type.
+        let import_path = compute_module_path(name, resolve, false);
+        for (type_name, ty_id) in resolve.interfaces[id].types.iter() {
+            let full_type_name = full_wit_type_name(resolve, *ty_id);
+            let mut rust_path_parts = import_path.clone();
+            rust_path_parts.push(to_upper_camel_case(type_name));
+            let rust_path = rust_path_parts.join("::");
+            self.with
+                .insert(full_type_name, TypeGeneration::Remap(rust_path));
+        }
+
+        // Now generate the export. This will use the `with` mappings to avoid
+        // generating new types.
+        self.export_interface(resolve, name, id, files)?;
+
+        /*
+        // Now generate the `impl` for the `Guest` trait.
+        let wasm_import_module = format!("[export]{}", resolve.name_world_key(name));
+        let mut gen = self.interface(
+            Identifier::Interface(id, name),
+            &wasm_import_module,
+            resolve,
+            false, // is_import
+        );
+
+        let funcs = resolve.interfaces[id].functions.values();
+        gen.generate_proxy(Some((id, name)), funcs);
+        let proxy_impl = gen.finish();
+        self.src.push_str(&proxy_impl);
+        */
+        Ok(())
     }
 
     fn finish_runtime_module(&mut self) {
@@ -1059,6 +1104,9 @@ impl WorldGenerator for RustWasm {
                 "//   * disable_custom_section_link_helpers"
             );
         }
+        if self.opts.proxy_component {
+            uwriteln!(self.src_preamble, "//   * proxy_component: import");
+        }
         for opt in self.opts.async_.debug_opts() {
             uwriteln!(self.src_preamble, "//   * async: {opt}");
         }
@@ -1267,6 +1315,15 @@ impl WorldGenerator for RustWasm {
             // functions since one of the side effects of that method is to
             // generate `struct`s for any imported resources.
             self.import_funcs(resolve, world, &[], files);
+        }
+
+        if self.opts.proxy_component {
+            let world = &resolve.worlds[world];
+            for (name, id) in world.imports.iter() {
+                if let WorldItem::Interface { id, .. } = id {
+                    self.proxy_interface(resolve, &name, *id, files).unwrap();
+                }
+            }
         }
     }
 
