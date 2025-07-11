@@ -1306,12 +1306,23 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             let params = self.print_signature(func, true, &sig);
             if self.r#gen.opts.proxy_component {
                 self.src.push_str(" {\n");
-                if func.kind.resource().is_some() {
-                    if let FunctionKind::Constructor(_) = func.kind {
-                        self.src.push_str("Stub::");
-                    } else {
-                        self.src.push_str("self.");
-                    }
+                let mut import_path = if let Some((_, world_key)) = interface {
+                    crate::compute_module_path(world_key, self.resolve, false)
+                } else {
+                    vec![]
+                }.join("::");
+                if !import_path.is_empty() {
+                    import_path.push_str("::");
+                }
+                if let Some(resource_id) = func.kind.resource() {
+                    let resource_name = self.resolve.types[resource_id].name.as_ref().unwrap().to_upper_camel_case();
+                    //if matches!(func.kind, FunctionKind::Constructor(_) | FunctionKind::Static(_) | FunctionKind::AsyncStatic(_)) {
+                        self.src.push_str(&import_path);
+                        self.src.push_str(&resource_name);
+                        self.src.push_str("::");
+                    //} else {
+                    //    self.src.push_str("self.");
+                    //}
                     self.src.push_str(&to_rust_ident(func.item_name()));
                     self.src.push_str("(");
                     let call_params = if let FunctionKind::Constructor(_) = func.kind {
@@ -1322,11 +1333,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     self.src.push_str(&call_params.join(", "));
                     self.src.push_str(")");
                 } else {
-                    if let Some((_, world_key)) = interface {
-                        let import_path_vec =
-                            crate::compute_module_path(world_key, self.resolve, false);
-                        self.src.push_str(&format!("{}::", &import_path_vec.join("::")));
-                    }
+                    self.src.push_str(&import_path);
                     self.src.push_str(&to_rust_ident(func.item_name()));
                     self.src.push_str("(");
                     self.src.push_str(&params.join(", "));
