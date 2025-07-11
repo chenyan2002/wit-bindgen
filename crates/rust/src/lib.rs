@@ -427,12 +427,11 @@ impl RustWasm {
     ) -> Result<()> {
         // For each type in the interface, add a `with` mapping to reuse the
         // corresponding import type.
-        let import_path = compute_module_path(name, resolve, false);
+        let mut import_path = compute_module_path(name, resolve, false);
         for (type_name, ty_id) in resolve.interfaces[id].types.iter() {
             let full_type_name = full_wit_type_name(resolve, *ty_id);
-            let mut rust_path_parts = import_path.clone();
-            rust_path_parts.push(to_upper_camel_case(type_name));
-            let rust_path = rust_path_parts.join("::");
+            import_path.push(to_upper_camel_case(type_name));
+            let rust_path = import_path.join("::");
             self.with
                 .insert(full_type_name, TypeGeneration::Remap(rust_path));
         }
@@ -1089,6 +1088,9 @@ impl WorldGenerator for RustWasm {
             );
         }
         if self.opts.proxy_component {
+            if !self.opts.stubs {
+                panic!("`proxy_component` requires `stubs` to be enabled");
+            }
             uwriteln!(self.src_preamble, "//   * proxy_component: import");
         }
         for opt in self.opts.async_.debug_opts() {
