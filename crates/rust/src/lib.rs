@@ -427,11 +427,19 @@ impl RustWasm {
     ) -> Result<()> {
         // For each type in the interface, add a `with` mapping to reuse the
         // corresponding import type.
-        let mut import_path = compute_module_path(name, resolve, false);
+        let import_path = compute_module_path(name, resolve, false);
+        let mut remapped_rust_types = Vec::new();
         for (type_name, ty_id) in resolve.interfaces[id].types.iter() {
+            // Skip resource types, as we need those bindings.
+            if resolve.types[*ty_id].kind == TypeDefKind::Resource {
+                continue;
+            }
             let full_type_name = full_wit_type_name(resolve, *ty_id);
-            import_path.push(to_upper_camel_case(type_name));
-            let rust_path = import_path.join("::");
+            let mut rust_path = import_path.clone();
+            rust_path.push(to_upper_camel_case(type_name));
+            // TODO fix crate:: prefix
+            let rust_path = "crate::".to_owned() + &rust_path.join("::");
+            remapped_rust_types.push(full_type_name.clone());
             self.with
                 .insert(full_type_name, TypeGeneration::Remap(rust_path));
         }
@@ -439,6 +447,10 @@ impl RustWasm {
         // Now generate the export. This will use the `with` mappings to avoid
         // generating new types.
         self.export_interface(resolve, name, id, files)?;
+        // Restore the original `with` mappings, but it shouldn't be necessary
+        for ty in remapped_rust_types {
+            self.with.insert(ty, TypeGeneration::Generate);
+        }
         Ok(())
     }
 

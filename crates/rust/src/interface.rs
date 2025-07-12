@@ -1314,15 +1314,24 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 if !import_path.is_empty() {
                     import_path.push_str("::");
                 }
+                // TODO fix crate:: prefix
+                import_path = "crate::".to_owned() + &import_path;
                 if let Some(resource_id) = func.kind.resource() {
                     let resource_name = self.resolve.types[resource_id].name.as_ref().unwrap().to_upper_camel_case();
-                    //if matches!(func.kind, FunctionKind::Constructor(_) | FunctionKind::Static(_) | FunctionKind::AsyncStatic(_)) {
-                        self.src.push_str(&import_path);
-                        self.src.push_str(&resource_name);
-                        self.src.push_str("::");
-                    //} else {
-                    //    self.src.push_str("self.");
-                    //}
+                    let resource_path = format!("{import_path}{resource_name}::");
+                    match func.kind {
+                        FunctionKind::Method(_) | FunctionKind::AsyncMethod(_) => {
+                            self.src.push_str(&format!(
+                                "let resource = unsafe {{ {resource_path}from_handle(self.handle()) }};\nresource.",
+                            ));
+                        }
+                        FunctionKind::Constructor(_) => {
+                            self.src.push_str("unreachable!();\n");
+                        },
+                        _ => {
+                            self.src.push_str(&resource_path);
+                        }
+                    }
                     self.src.push_str(&to_rust_ident(func.item_name()));
                     self.src.push_str("(");
                     let call_params = if let FunctionKind::Constructor(_) = func.kind {
@@ -2346,6 +2355,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
         }
 
         if self.is_exported_resource(id) {
+        //if self.resolve.types[id].kind == TypeDefKind::Resource {
             self.rustdoc(docs);
             let name = self.resolve.types[id].name.as_ref().unwrap();
             let name = name.to_upper_camel_case();
