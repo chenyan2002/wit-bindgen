@@ -431,9 +431,9 @@ impl RustWasm {
         let mut remapped_rust_types = Vec::new();
         for (type_name, ty_id) in resolve.interfaces[id].types.iter() {
             // Skip resource types, as we need those bindings.
-            //if resolve.types[*ty_id].kind == TypeDefKind::Resource {
-            //    continue;
-            //}
+            if resolve.types[*ty_id].kind == TypeDefKind::Resource {
+                continue;
+            }
             let full_type_name = full_wit_type_name(resolve, *ty_id);
             let mut rust_path = import_path.clone();
             rust_path.push(to_upper_camel_case(type_name));

@@ -2354,20 +2354,14 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             self.push_str(";\n");
         }
 
-        let is_resource_alias =
-            matches!(self.resolve.types[dealias(self.resolve, id)].kind, TypeDefKind::Resource);
-
-        if is_resource_alias && (self.is_exported_resource(id) || (self.in_import && self.r#gen.opts.proxy_component)) {
-        //if self.is_exported_resource(id) {
+        if self.is_exported_resource(id) {
         //if self.resolve.types[id].kind == TypeDefKind::Resource {
             self.rustdoc(docs);
             let name = self.resolve.types[id].name.as_ref().unwrap();
             let name = name.to_upper_camel_case();
             self.push_str(&format!("pub type {name}Borrow<'a>"));
             self.push_str(" = ");
-            //self.print_ty(ty, TypeMode::owned());
-            let aliased_mode = self.type_mode_for(ty, TypeOwnershipStyle::Owned, "'a");
-            self.print_ty(ty, aliased_mode);
+            self.print_ty(ty, TypeMode::owned());
             self.push_str("Borrow<'a>");
             self.push_str(";\n");
         }
@@ -2642,36 +2636,6 @@ impl<'a> wit_bindgen_core::InterfaceGenerator<'a> for InterfaceGenerator<'a> {
                     }}
                 "#
             );
-            if self.r#gen.opts.proxy_component {
-                uwriteln!(
-                    self.src,
-                    r#"
-/// A borrowed version of [`{camel}`] which represents a borrowed value
-/// with the lifetime `'a`.
-#[derive(Debug)]
-#[repr(transparent)]
-pub struct {camel}Borrow<'a> {{
-    rep: *mut u8,
-    _marker: core::marker::PhantomData<&'a {camel}>,
-}}
-
-impl<'a> {camel}Borrow<'a> {{
-    #[doc(hidden)]
-    pub unsafe fn lift(rep: usize) -> Self {{
-        Self {{
-            rep: rep as *mut u8,
-            _marker: core::marker::PhantomData,
-        }}
-    }}
-
-    /// Gets access to the underlying `{camel}` instance.
-    pub fn get(&self) -> &{camel} {{
-        unsafe {{ &*(self.rep as *const {camel}) }}
-    }}
-}}
-"#
-                );
-            }
             self.wasm_import_module.to_string()
         } else {
             let module = match self.identifier {
