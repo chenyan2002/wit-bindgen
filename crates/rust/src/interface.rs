@@ -704,7 +704,10 @@ pub mod vtable{ordinal} {{
             sig.update_for_func(&func);
         }
         self.src.push_str("#[allow(unused_unsafe, clippy::all)]\n");
-        let params = self.print_signature(func, async_, &sig);
+        let params_owned = if self.r#gen.opts.proxy_component { true } else {
+            async_
+        };
+        let params = self.print_signature(func, params_owned, &sig);
         self.src.push_str("{\n");
         self.src.push_str("unsafe {\n");
 
