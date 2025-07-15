@@ -1251,7 +1251,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
 
         let mut extra_trait_items = String::new();
         let guest_trait = match interface {
-            Some((id, _)) => {
+            Some((id, key)) => {
                 let path = self.path_to_interface(id).unwrap();
                 for (name, id) in self.resolve.interfaces[id].types.iter() {
                     match self.resolve.types[*id].kind {
@@ -1259,11 +1259,18 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                         _ => continue,
                     }
                     let camel = name.to_upper_camel_case();
-                    uwriteln!(extra_trait_items, "type {camel} = Stub;");
+                    let stub = if self.r#gen.opts.proxy_component {
+                        let mut path = crate::compute_module_path(key, self.resolve, false);
+                        path.push(camel.clone());
+                        path.join("::")
+                    } else {
+                        "Stub".to_string()
+                    };
+                    uwriteln!(extra_trait_items, "type {camel} = {stub};");
 
                     let resource_methods = funcs.remove(&Some(*id)).unwrap_or(Vec::new());
                     let trait_name = format!("{path}::Guest{camel}");
-                    self.generate_stub_impl(&trait_name, "", &resource_methods, interface);
+                    self.generate_stub_impl(&trait_name, "", &resource_methods, interface, &stub);
                 }
                 format!("{path}::Guest")
             }
@@ -1274,7 +1281,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
         };
 
         if !root_methods.is_empty() || !extra_trait_items.is_empty() {
-            self.generate_stub_impl(&guest_trait, &extra_trait_items, &root_methods, interface);
+            self.generate_stub_impl(&guest_trait, &extra_trait_items, &root_methods, interface, "Stub");
         }
     }
 
@@ -1284,8 +1291,9 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
         extra_trait_items: &str,
         funcs: &[&Function],
         interface: Option<(InterfaceId, &WorldKey)>,
+        stub: &str,
     ) {
-        uwriteln!(self.src, "impl {trait_name} for Stub {{");
+        uwriteln!(self.src, "impl {trait_name} for {stub} {{");
         self.src.push_str(extra_trait_items);
 
         for func in funcs {
