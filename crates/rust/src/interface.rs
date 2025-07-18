@@ -1316,6 +1316,11 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             self.src.push_str("#[allow(unused_variables)]\n");
             let params = self.print_signature(func, true, &sig);
             if self.r#gen.opts.proxy_component {
+                // TODO: find a way to convert Borrow to &
+                if to_rust_ident(&func.item_name()) == "filesystem_error_code" {
+                    self.src.push_str("{ todo!() }\n");
+                    continue;
+                }
                 self.src.push_str(" {\n");
                 let mut import_path = if let Some((_, world_key)) = interface {
                     crate::compute_module_path(world_key, self.resolve, false)
