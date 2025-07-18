@@ -2365,8 +2365,11 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             self.push_str(";\n");
         }
 
-        if self.is_exported_resource(id) {
-        //if self.resolve.types[id].kind == TypeDefKind::Resource {
+        let dealiased = dealias(self.resolve, id);
+        if self.is_exported_resource(id) || (self.r#gen.opts.proxy_component && matches!(self.resolve.types[dealiased].kind, TypeDefKind::Resource)) {
+            // When proxy_component is enabled, we put the `Borrow` type in both import and export module,
+            // From `with`, this points to the `Borrow` type in the import module, which is simply
+            // an alias to the export module's real `Borrow` type.
             self.rustdoc(docs);
             let name = self.resolve.types[id].name.as_ref().unwrap();
             let name = name.to_upper_camel_case();
@@ -2610,7 +2613,7 @@ impl<'a> wit_bindgen_core::InterfaceGenerator<'a> for InterfaceGenerator<'a> {
         self.print_typedef_record(id, record, docs);
     }
 
-    fn type_resource(&mut self, _id: TypeId, name: &str, docs: &Docs) {
+    fn type_resource(&mut self, id: TypeId, name: &str, docs: &Docs) {
         self.rustdoc(docs);
         let camel = to_upper_camel_case(name);
         let resource = self.path_to_resource();
@@ -2647,6 +2650,19 @@ impl<'a> wit_bindgen_core::InterfaceGenerator<'a> for InterfaceGenerator<'a> {
                     }}
                 "#
             );
+            if self.r#gen.opts.proxy_component {
+                // Add an alias which points to the `Borrow` type in the export module.
+                let key = match self.resolve.types[id].owner {
+                    TypeOwner::Interface(id) => WorldKey::Interface(id),
+                    TypeOwner::World(_) | TypeOwner::None => unreachable!(),
+                };
+                let path = crate::compute_module_path(&key, self.resolve, true);
+                let path = path.join("::");
+                uwriteln!(self.src, r#"
+/// Only used for proxy component.
+pub type {camel}Borrow<'a> = crate::{path}::{camel}Borrow<'a>;
+                "#);
+            }
             self.wasm_import_module.to_string()
         } else {
             let module = match self.identifier {
