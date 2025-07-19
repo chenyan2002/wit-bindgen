@@ -704,7 +704,9 @@ pub mod vtable{ordinal} {{
             sig.update_for_func(&func);
         }
         self.src.push_str("#[allow(unused_unsafe, clippy::all)]\n");
-        let params_owned = if self.r#gen.opts.proxy_component { true } else {
+        let params_owned = if self.r#gen.opts.proxy_component {
+            true
+        } else {
             async_
         };
         let params = self.print_signature(func, params_owned, &sig);
@@ -1284,7 +1286,13 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
         };
 
         if !root_methods.is_empty() || !extra_trait_items.is_empty() {
-            self.generate_stub_impl(&guest_trait, &extra_trait_items, &root_methods, interface, "Stub");
+            self.generate_stub_impl(
+                &guest_trait,
+                &extra_trait_items,
+                &root_methods,
+                interface,
+                "Stub",
+            );
         }
     }
 
@@ -1326,14 +1334,19 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     crate::compute_module_path(world_key, self.resolve, false)
                 } else {
                     vec![]
-                }.join("::");
+                }
+                .join("::");
                 if !import_path.is_empty() {
                     import_path.push_str("::");
                 }
                 // TODO fix crate:: prefix
                 import_path = "crate::".to_owned() + &import_path;
                 if let Some(resource_id) = func.kind.resource() {
-                    let resource_name = self.resolve.types[resource_id].name.as_ref().unwrap().to_upper_camel_case();
+                    let resource_name = self.resolve.types[resource_id]
+                        .name
+                        .as_ref()
+                        .unwrap()
+                        .to_upper_camel_case();
                     let resource_path = format!("{import_path}{resource_name}::");
                     match func.kind {
                         FunctionKind::Method(_) | FunctionKind::AsyncMethod(_) => {
@@ -1343,7 +1356,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                         }
                         FunctionKind::Constructor(_) => {
                             self.src.push_str("unreachable!();\n");
-                        },
+                        }
                         _ => {
                             self.src.push_str(&resource_path);
                         }
@@ -2371,7 +2384,10 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
         }
 
         let dealiased = dealias(self.resolve, id);
-        if self.is_exported_resource(id) || (self.r#gen.opts.proxy_component && matches!(self.resolve.types[dealiased].kind, TypeDefKind::Resource)) {
+        if self.is_exported_resource(id)
+            || (self.r#gen.opts.proxy_component
+                && matches!(self.resolve.types[dealiased].kind, TypeDefKind::Resource))
+        {
             // When proxy_component is enabled, we put the `Borrow` type in both import and export module,
             // From `with`, this points to the `Borrow` type in the import module, which is simply
             // an alias to the export module's real `Borrow` type.
@@ -2663,10 +2679,13 @@ impl<'a> wit_bindgen_core::InterfaceGenerator<'a> for InterfaceGenerator<'a> {
                 };
                 let path = crate::compute_module_path(&key, self.resolve, true);
                 let path = path.join("::");
-                uwriteln!(self.src, r#"
+                uwriteln!(
+                    self.src,
+                    r#"
 /// Only used for proxy component.
 pub type {camel}Borrow<'a> = crate::{path}::{camel}Borrow<'a>;
-                "#);
+                "#
+                );
             }
             self.wasm_import_module.to_string()
         } else {

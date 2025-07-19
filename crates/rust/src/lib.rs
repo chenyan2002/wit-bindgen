@@ -44,6 +44,8 @@ struct RustWasm {
     generated_types: HashSet<String>,
     world: Option<WorldId>,
 
+    proxy_interfaces: HashSet<InterfaceId>,
+
     rt_module: IndexSet<RuntimeItem>,
     export_macros: Vec<(String, String)>,
 
@@ -423,8 +425,9 @@ impl RustWasm {
         resolve: &Resolve,
         name: &WorldKey,
         id: InterfaceId,
-        files: &mut Files,
+        _files: &mut Files,
     ) -> Result<()> {
+        self.proxy_interfaces.insert(id);
         // For each type in the interface, add a `with` mapping to reuse the
         // corresponding import type.
         let import_path = compute_module_path(name, resolve, false);
@@ -445,7 +448,7 @@ impl RustWasm {
 
         // Now generate the export. This will use the `with` mappings to avoid
         // generating new types.
-        self.export_interface(resolve, name, id, files)?;
+        // self.export_interface(resolve, name, id, files)?;
         Ok(())
     }
 
@@ -1196,6 +1199,9 @@ impl WorldGenerator for RustWasm {
         id: InterfaceId,
         _files: &mut Files,
     ) -> Result<()> {
+        if self.opts.proxy_component && !self.proxy_interfaces.contains(&id) {
+            bail!("All export interfaces need to appear in the import interfaces in the proxy_component mode");
+        }
         let mut to_define = Vec::new();
         for (name, ty_id) in resolve.interfaces[id].types.iter() {
             let full_name = full_wit_type_name(resolve, *ty_id);
@@ -1204,7 +1210,10 @@ impl WorldGenerator for RustWasm {
                 // When proxy_component is enabled, if the type alias points a resource,
                 // the type alias needs to be generated even though it is remapped.
                 let final_ty = dealias(resolve, *ty_id);
-                if type_gen.generated() || (self.opts.proxy_component && resolve.types[final_ty].kind == TypeDefKind::Resource) {
+                if type_gen.generated()
+                    || (self.opts.proxy_component
+                        && resolve.types[final_ty].kind == TypeDefKind::Resource)
+                {
                     to_define.push((name, ty_id));
                 }
             } else {
