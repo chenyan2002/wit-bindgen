@@ -1324,12 +1324,18 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             self.src.push_str("#[allow(unused_variables)]\n");
             let params = self.print_signature(func, true, &sig);
             if self.r#gen.opts.proxy_component {
+                let func_name = to_rust_ident(&func.item_name());
                 // TODO: find a way to convert Borrow to &
-                if to_rust_ident(&func.item_name()) == "filesystem_error_code" {
+                if func_name == "filesystem_error_code" {
                     self.src.push_str("{ todo!() }\n");
                     continue;
                 }
                 self.src.push_str(" {\n");
+                // record
+                self.src.push_str("proxy::recorder::record::record(\"");
+                self.src.push_str(&func_name);
+                self.src.push_str("\".to_string(), String::new(), String::new());");
+                // call import functions
                 let mut import_path = if let Some((_, world_key)) = interface {
                     crate::compute_module_path(world_key, self.resolve, false)
                 } else {
@@ -1361,7 +1367,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                             self.src.push_str(&resource_path);
                         }
                     }
-                    self.src.push_str(&to_rust_ident(func.item_name()));
+                    self.src.push_str(&func_name);
                     self.src.push_str("(");
                     let call_params = if let FunctionKind::Constructor(_) = func.kind {
                         &params
