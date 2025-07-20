@@ -1334,7 +1334,8 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 // record
                 self.src.push_str("proxy::recorder::record::record(\"");
                 self.src.push_str(&func_name);
-                self.src.push_str("\".to_string(), String::new(), String::new());");
+                self.src
+                    .push_str("\".to_string(), String::new(), String::new());");
                 // call import functions
                 let mut import_path = if let Some((_, world_key)) = interface {
                     crate::compute_module_path(world_key, self.resolve, false)
@@ -1369,7 +1370,12 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     }
                     self.src.push_str(&func_name);
                     self.src.push_str("(");
-                    let call_params = if let FunctionKind::Constructor(_) = func.kind {
+                    let call_params = if matches!(
+                        func.kind,
+                        FunctionKind::Constructor(_)
+                            | FunctionKind::Static(_)
+                            | FunctionKind::AsyncStatic(_)
+                    ) {
                         &params
                     } else {
                         &params[1..]

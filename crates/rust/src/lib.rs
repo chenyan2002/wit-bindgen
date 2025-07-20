@@ -1324,10 +1324,19 @@ impl WorldGenerator for RustWasm {
 
         if self.opts.proxy_component {
             let world = &resolve.worlds[world];
+            let mut has_logging_import = false;
+            let logging_import_name = "proxy:recorder/record@0.1.0";
             for (name, id) in world.imports.iter() {
                 if let WorldItem::Interface { id, .. } = id {
+                    let interface_name = resolve.id_of(*id);
+                    if matches!(interface_name, Some(name) if name == logging_import_name) {
+                        has_logging_import = true;
+                    }
                     self.proxy_interface(resolve, &name, *id, files).unwrap();
                 }
+            }
+            if !has_logging_import {
+                panic!("Cannot find required import {logging_import_name}");
             }
         }
     }
