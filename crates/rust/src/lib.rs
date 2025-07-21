@@ -44,8 +44,6 @@ struct RustWasm {
     generated_types: HashSet<String>,
     world: Option<WorldId>,
 
-    proxy_interfaces: HashSet<InterfaceId>,
-
     rt_module: IndexSet<RuntimeItem>,
     export_macros: Vec<(String, String)>,
 
@@ -427,9 +425,8 @@ impl RustWasm {
         id: InterfaceId,
         _files: &mut Files,
     ) -> Result<()> {
-        self.proxy_interfaces.insert(id);
         // For each type in the interface, add a `with` mapping to reuse the
-        // corresponding import type.
+        // corresponding import type in the export module
         let import_path = compute_module_path(name, resolve, false);
         for (type_name, ty_id) in resolve.interfaces[id].types.iter() {
             // Skip resource types, as we need those bindings.
@@ -445,10 +442,6 @@ impl RustWasm {
             self.with
                 .insert(full_type_name, TypeGeneration::Remap(rust_path));
         }
-
-        // Now generate the export. This will use the `with` mappings to avoid
-        // generating new types.
-        // self.export_interface(resolve, name, id, files)?;
         Ok(())
     }
 
@@ -1101,6 +1094,36 @@ impl WorldGenerator for RustWasm {
             if !self.opts.stubs {
                 panic!("`proxy_component` requires `stubs` to be enabled");
             }
+            let world = &resolve.worlds[world];
+            // import and export interfaces should be the same, except the logging import
+            let logging_import_name = "proxy:recorder/record@0.1.0";
+            let mut imports: HashSet<_> = world
+                .imports
+                .iter()
+                .filter_map(|(_, item)| {
+                    if let WorldItem::Interface { id, .. } = item {
+                        resolve.id_of(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !imports.remove(logging_import_name) {
+                panic!("cannot find required import {logging_import_name}");
+            }
+            for (_, item) in world.exports.iter() {
+                if let WorldItem::Interface { id, .. } = item {
+                    let name = resolve.id_of(*id);
+                    if let Some(name) = name {
+                        if !imports.remove(&name) {
+                            panic!("{name} is only in the export, but not in the import");
+                        }
+                    }
+                }
+            }
+            if !imports.is_empty() {
+                panic!("The following imports are not found in the export: {imports:?}");
+            }
             uwriteln!(self.src_preamble, "//   * proxy_component: import");
         }
         for opt in self.opts.async_.debug_opts() {
@@ -1199,9 +1222,6 @@ impl WorldGenerator for RustWasm {
         id: InterfaceId,
         _files: &mut Files,
     ) -> Result<()> {
-        if self.opts.proxy_component && !self.proxy_interfaces.contains(&id) {
-            bail!("All export interfaces need to appear in the import interfaces in the proxy_component mode");
-        }
         let mut to_define = Vec::new();
         for (name, ty_id) in resolve.interfaces[id].types.iter() {
             let full_name = full_wit_type_name(resolve, *ty_id);
@@ -1324,19 +1344,10 @@ impl WorldGenerator for RustWasm {
 
         if self.opts.proxy_component {
             let world = &resolve.worlds[world];
-            let mut has_logging_import = false;
-            let logging_import_name = "proxy:recorder/record@0.1.0";
             for (name, id) in world.imports.iter() {
                 if let WorldItem::Interface { id, .. } = id {
-                    let interface_name = resolve.id_of(*id);
-                    if matches!(interface_name, Some(name) if name == logging_import_name) {
-                        has_logging_import = true;
-                    }
                     self.proxy_interface(resolve, &name, *id, files).unwrap();
                 }
-            }
-            if !has_logging_import {
-                panic!("Cannot find required import {logging_import_name}");
             }
         }
     }
