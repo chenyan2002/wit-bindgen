@@ -1354,7 +1354,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     .collect::<Vec<_>>();
                 // record
                 if !call_params.is_empty() {
-                    self.src.push_str("use crate::ToWave;");
+                    self.src.push_str("use crate::ToWave;\n");
                     self.src
                         .push_str("let mut params: Vec<String> = Vec::new();\n");
                     for param in call_params {
@@ -1379,24 +1379,23 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 }
                 // TODO fix crate:: prefix
                 import_path = "crate::".to_owned() + &import_path;
-                if let Some(resource_id) = func.kind.resource() {
-                    let resource_name = self.resolve.types[resource_id]
+                if let Some(_resource_id) = func.kind.resource() {
+                    /*let resource_name = self.resolve.types[resource_id]
                         .name
                         .as_ref()
                         .unwrap()
                         .to_upper_camel_case();
-                    let resource_path = format!("{import_path}{resource_name}::");
+                    let resource_path = format!("{import_path}{resource_name}::");*/
                     match func.kind {
                         FunctionKind::Method(_) | FunctionKind::AsyncMethod(_) => {
-                            self.src.push_str(&format!(
+                            self.src.push_str("self.");
+                            /*self.src.push_str(&format!(
                                 "let resource = unsafe {{ {resource_path}from_handle(self.handle()) }};\nresource.",
-                            ));
-                        }
-                        FunctionKind::Constructor(_) => {
-                            self.src.push_str("unreachable!();\n");
+                            ));*/
                         }
                         _ => {
-                            self.src.push_str(&resource_path);
+                            //self.src.push_str(&resource_path);
+                            self.src.push_str("Self::");
                         }
                     }
                     self.src.push_str(&func_name);
