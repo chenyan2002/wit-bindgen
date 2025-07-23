@@ -444,6 +444,29 @@ impl RustWasm {
         }
         Ok(())
     }
+    fn emit_wave(&mut self) {
+        self.src.push_str(
+            r#"
+trait ToWave {
+    fn to_wave_string(&self) -> String where Self: std::fmt::Debug {
+      format!("{self:?}")
+    }
+}
+impl<T: ToWave> ToWave for &T {}
+impl<T: ToWave> ToWave for Vec<T> {}
+impl<T: ToWave> ToWave for Option<T> {}
+impl<T: ToWave> ToWave for &[T] {}
+impl ToWave for &str {}
+impl ToWave for String {}
+impl ToWave for u8 {}
+impl ToWave for u16 {}
+impl ToWave for u32 {}
+impl ToWave for u64 {}
+impl ToWave for () {}
+impl<T: ToWave, E: ToWave> ToWave for std::result::Result<T, E> {}
+"#,
+        );
+    }
 
     fn finish_runtime_module(&mut self) {
         if !self.rt_module.is_empty() {
@@ -1362,6 +1385,9 @@ impl WorldGenerator for RustWasm {
 
         self.finish_runtime_module();
         self.finish_export_macro(resolve, world);
+        if self.opts.proxy_component {
+            self.emit_wave();
+        }
 
         // This is a bit tricky, but we sometimes want to "split" the `world` in
         // two and only encode the imports here.

@@ -704,12 +704,7 @@ pub mod vtable{ordinal} {{
             sig.update_for_func(&func);
         }
         self.src.push_str("#[allow(unused_unsafe, clippy::all)]\n");
-        let params_owned = if self.r#gen.opts.proxy_component {
-            true
-        } else {
-            async_
-        };
-        let params = self.print_signature(func, params_owned, &sig);
+        let (params, _) = self.print_signature(func, async_, &sig);
         self.src.push_str("{\n");
         self.src.push_str("unsafe {\n");
 
@@ -1322,7 +1317,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             };
             sig.update_for_func(&func);
             self.src.push_str("#[allow(unused_variables)]\n");
-            let params = self.print_signature(func, true, &sig);
+            let (params, _) = self.print_signature(func, true, &sig);
             if self.r#gen.opts.proxy_component {
                 let func_name = to_rust_ident(&func.item_name());
                 // TODO: find a way to convert Borrow to &
@@ -1331,11 +1326,47 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     continue;
                 }
                 self.src.push_str(" {\n");
+                // align export and import arguments
+                self.src.push_str("/* import signature: ");
+                // The real intend is to get is_borrowed, but the side effect is
+                // that it also generates the signature in self.src
+                // We work around that, we wrap this code inside a comment region.
+                let (_, is_borrowed) = self.print_signature(func, async_, &sig);
+                self.src.push_str("*/\n");
+                let call_params = if matches!(
+                    func.kind,
+                    FunctionKind::Method(_) | FunctionKind::AsyncMethod(_)
+                ) {
+                    &params[1..]
+                } else {
+                    &params
+                };
+                let call_args = call_params
+                    .iter()
+                    .zip(is_borrowed)
+                    .map(|(arg, is_borrowed)| {
+                        if is_borrowed {
+                            format!("&{arg}")
+                        } else {
+                            arg.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 // record
+                if !call_params.is_empty() {
+                    self.src.push_str("use crate::ToWave;");
+                    self.src
+                        .push_str("let mut params: Vec<String> = Vec::new();\n");
+                    for param in call_params {
+                        self.src
+                            .push_str(&format!("params.push({param}.to_wave_string());\n"));
+                    }
+                } else {
+                    self.src.push_str("let params: Vec<String> = Vec::new();\n");
+                }
                 self.src.push_str("proxy::recorder::record::record(\"");
                 self.src.push_str(&func_name);
-                self.src
-                    .push_str("\".to_string(), String::new(), String::new());");
+                self.src.push_str("\", &params, \"\");\n");
                 // call import functions
                 let mut import_path = if let Some((_, world_key)) = interface {
                     crate::compute_module_path(world_key, self.resolve, false)
@@ -1370,23 +1401,13 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     }
                     self.src.push_str(&func_name);
                     self.src.push_str("(");
-                    let call_params = if matches!(
-                        func.kind,
-                        FunctionKind::Constructor(_)
-                            | FunctionKind::Static(_)
-                            | FunctionKind::AsyncStatic(_)
-                    ) {
-                        &params
-                    } else {
-                        &params[1..]
-                    };
-                    self.src.push_str(&call_params.join(", "));
+                    self.src.push_str(&call_args.join(", "));
                     self.src.push_str(")");
                 } else {
                     self.src.push_str(&import_path);
                     self.src.push_str(&to_rust_ident(func.item_name()));
                     self.src.push_str("(");
-                    self.src.push_str(&params.join(", "));
+                    self.src.push_str(&call_args.join(", "));
                     self.src.push_str(")");
                 }
                 if async_ {
@@ -1455,14 +1476,19 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
         // }
     }
 
-    fn print_signature(&mut self, func: &Function, params_owned: bool, sig: &FnSig) -> Vec<String> {
-        let params = self.print_docs_and_params(func, params_owned, sig);
+    fn print_signature(
+        &mut self,
+        func: &Function,
+        params_owned: bool,
+        sig: &FnSig,
+    ) -> (Vec<String>, Vec<bool>) {
+        let (params, is_borrowed) = self.print_docs_and_params(func, params_owned, sig);
         if let FunctionKind::Constructor(_) = &func.kind {
             self.push_str(" -> Self")
         } else {
             self.print_results(&func.result);
         }
-        params
+        (params, is_borrowed)
     }
 
     fn print_docs_and_params(
@@ -1470,7 +1496,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
         func: &Function,
         params_owned: bool,
         sig: &FnSig,
-    ) -> Vec<String> {
+    ) -> (Vec<String>, Vec<bool>) {
         self.rustdoc(&func.docs);
         self.rustdoc_params(&func.params, "Parameters");
         // TODO: re-add this when docs are back
@@ -1509,6 +1535,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             self.push_str(",");
         }
         let mut params = Vec::new();
+        let mut is_borrowed = Vec::new();
         for (i, (name, param)) in func.params.iter().enumerate() {
             if i == 0 && sig.self_is_first_param {
                 params.push("self".to_string());
@@ -1542,6 +1569,8 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             };
             let mode = self.type_mode_for(param, style, "'_");
             self.print_ty(param, mode);
+            let generated_ty = self.src.as_str().rfind(": ").unwrap();
+            is_borrowed.push(self.src.as_str().as_bytes()[generated_ty + 2] == b'&');
             self.push_str(",");
 
             // Depending on the style of this request vs what we got perhaps
@@ -1573,7 +1602,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             }
         }
         self.push_str(")");
-        params
+        (params, is_borrowed)
     }
 
     fn print_results(&mut self, result: &Option<Type>) {
