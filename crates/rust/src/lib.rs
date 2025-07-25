@@ -452,6 +452,8 @@ trait ToWave {
       format!("{self:?}")
     }
 }
+impl<T: std::fmt::Debug> ToWave for T {}
+/*
 impl<T: ToWave> ToWave for &T {}
 impl<T: ToWave> ToWave for Vec<T> {}
 impl<T: ToWave> ToWave for Option<T> {}
@@ -464,6 +466,7 @@ impl ToWave for u32 {}
 impl ToWave for u64 {}
 impl ToWave for () {}
 impl<T: ToWave, E: ToWave> ToWave for std::result::Result<T, E> {}
+*/
 "#,
         );
     }

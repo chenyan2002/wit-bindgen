@@ -1379,22 +1379,13 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 }
                 // TODO fix crate:: prefix
                 import_path = "crate::".to_owned() + &import_path;
+                self.src.push_str("let res = ");
                 if let Some(_resource_id) = func.kind.resource() {
-                    /*let resource_name = self.resolve.types[resource_id]
-                        .name
-                        .as_ref()
-                        .unwrap()
-                        .to_upper_camel_case();
-                    let resource_path = format!("{import_path}{resource_name}::");*/
                     match func.kind {
                         FunctionKind::Method(_) | FunctionKind::AsyncMethod(_) => {
                             self.src.push_str("self.");
-                            /*self.src.push_str(&format!(
-                                "let resource = unsafe {{ {resource_path}from_handle(self.handle()) }};\nresource.",
-                            ));*/
                         }
                         _ => {
-                            //self.src.push_str(&resource_path);
                             self.src.push_str("Self::");
                         }
                     }
@@ -1412,10 +1403,12 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 if async_ {
                     self.src.push_str(".await");
                 }
-                if func.result.is_none() {
-                    self.src.push_str(";");
+                self.src.push_str(";\n");
+                self.src.push_str(&format!("proxy::recorder::record::record(\"{func_name}\", &[], &res.to_wave_string());\n"));
+                if func.result.is_some() {
+                    self.src.push_str("res\n");
                 }
-                self.src.push_str("\n}\n");
+                self.src.push_str("}\n");
             } else {
                 self.src.push_str("{ unreachable!() }\n");
             }
