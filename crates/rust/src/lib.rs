@@ -42,6 +42,7 @@ struct RustWasm {
     // Track which interfaces and types are generated. Remapped interfaces and types provided via `with`
     // are required to be used.
     generated_types: HashSet<String>,
+    proxy_import_only_interfaces: HashSet<InterfaceId>,
     world: Option<WorldId>,
 
     rt_module: IndexSet<RuntimeItem>,
@@ -1121,35 +1122,29 @@ impl WorldGenerator for RustWasm {
                 panic!("`proxy_component` requires `stubs` to be enabled");
             }
             let world = &resolve.worlds[world];
-            // import and export interfaces should be the same, except the logging import
-            let logging_import_name = "proxy:recorder/record@0.1.0";
+            // check if all exports appear in the imports
             let mut imports: HashSet<_> = world
                 .imports
                 .iter()
                 .filter_map(|(_, item)| {
                     if let WorldItem::Interface { id, .. } = item {
-                        resolve.id_of(*id)
+                        Some(*id)
                     } else {
                         None
                     }
                 })
                 .collect();
-            if !imports.remove(logging_import_name) {
-                panic!("cannot find required import {logging_import_name}");
-            }
             for (_, item) in world.exports.iter() {
                 if let WorldItem::Interface { id, .. } = item {
-                    let name = resolve.id_of(*id);
-                    if let Some(name) = name {
-                        if !imports.remove(&name) {
-                            panic!("{name} is only in the export, but not in the import");
-                        }
+                    if !imports.remove(id) {
+                        let name = resolve.id_of(*id).unwrap_or("anonymous".to_owned());
+                        panic!("{name} is only in the export, but not in the import");
                     }
                 }
             }
-            if !imports.is_empty() {
-                panic!("The following imports are not found in the export: {imports:?}");
-            }
+            // For export proxy, we can have more imports than exports due to transitive dependency.
+            // Also the logging interface is always import only.
+            self.proxy_import_only_interfaces = imports;
             uwriteln!(self.src_preamble, "//   * proxy_component: import");
         }
         for opt in self.opts.async_.debug_opts() {

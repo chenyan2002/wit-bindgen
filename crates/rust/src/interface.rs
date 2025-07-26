@@ -2705,18 +2705,29 @@ impl<'a> wit_bindgen_core::InterfaceGenerator<'a> for InterfaceGenerator<'a> {
                 "#
             );
             if self.r#gen.opts.proxy_component {
+                let mut is_import_only = false;
                 // Add an alias which points to the `Borrow` type in the export module.
                 let key = match self.resolve.types[id].owner {
-                    TypeOwner::Interface(id) => WorldKey::Interface(id),
+                    TypeOwner::Interface(id) => {
+                        if self.r#gen.proxy_import_only_interfaces.contains(&id) {
+                            is_import_only = true;
+                        }
+                        WorldKey::Interface(id)
+                    }
                     TypeOwner::World(_) | TypeOwner::None => unreachable!(),
                 };
-                let path = crate::compute_module_path(&key, self.resolve, true);
-                let path = path.join("::");
+                let target_type = if is_import_only {
+                    "&'a ()".to_string()
+                } else {
+                    let path = crate::compute_module_path(&key, self.resolve, true);
+                    let path = path.join("::");
+                    format!("crate::{path}::{camel}Borrow<'a>")
+                };
                 uwriteln!(
                     self.src,
                     r#"
 /// Only used for proxy component.
-pub type {camel}Borrow<'a> = crate::{path}::{camel}Borrow<'a>;
+pub type {camel}Borrow<'a> = {target_type};
                 "#
                 );
             }
