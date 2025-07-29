@@ -1328,28 +1328,74 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 self.src.push_str(" {\n");
                 // align export and import arguments
                 self.src.push_str("/* import signature: ");
-                // The real intend is to get is_borrowed, but the side effect is
+                // The real intend is to get is_borrowed in the import signature, but the side effect is
                 // that it also generates the signature in self.src
-                // We work around that, we wrap this code inside a comment region.
+                // To work around that, we wrap this code inside a comment region.
                 let (_, is_borrowed) = self.print_signature(func, async_, &sig);
                 self.src.push_str("*/\n");
-                let call_params = if matches!(
+                let (call_params, call_ty) = if matches!(
                     func.kind,
                     FunctionKind::Method(_) | FunctionKind::AsyncMethod(_)
                 ) {
-                    &params[1..]
+                    (&params[1..], &func.params[1..])
                 } else {
-                    &params
+                    (params.as_slice(), func.params.as_slice())
                 };
+                fn generate_arg(
+                    resolve: &Resolve,
+                    ty: &Type,
+                    arg: &str,
+                    is_borrowed: bool,
+                    to_import: bool,
+                ) -> String {
+                    // TODO handle nested resource/handle types
+                    if let Type::Id(orig_id) = ty {
+                        let final_id = dealias(resolve, *orig_id);
+                        if to_import {
+                            match resolve.types[final_id].kind {
+                                TypeDefKind::Handle(Handle::Borrow(_)) => {
+                                    return format!("{arg}.get()")
+                                }
+                                TypeDefKind::Handle(Handle::Own(_)) => {
+                                    return format!("{arg}.into_inner()")
+                                }
+                                _ => (),
+                            }
+                        } else {
+                            let info = match resolve.types[final_id].kind {
+                                TypeDefKind::Handle(Handle::Borrow(id)) => Some((id, true)),
+                                TypeDefKind::Handle(Handle::Own(id)) => Some((id, false)),
+                                _ => None,
+                            };
+                            if let Some((id, is_borrowed)) = info {
+                                let key = match resolve.types[id].owner {
+                                    TypeOwner::Interface(id) => WorldKey::Interface(id),
+                                    TypeOwner::World(_) | TypeOwner::None => unreachable!(),
+                                };
+                                let path =
+                                    crate::compute_module_path(&key, resolve, true).join("::");
+                                let name = resolve.types[id].name.as_ref().unwrap();
+                                let camel = to_upper_camel_case(&name);
+                                if is_borrowed {
+                                    return format!("crate::{path}::{camel}Borrow::new({arg})");
+                                } else {
+                                    return format!("crate::{path}::{camel}::new({arg})");
+                                }
+                            }
+                        }
+                    }
+                    if is_borrowed {
+                        format!("&{arg}")
+                    } else {
+                        arg.to_string()
+                    }
+                }
                 let call_args = call_params
                     .iter()
                     .zip(is_borrowed)
-                    .map(|(arg, is_borrowed)| {
-                        if is_borrowed {
-                            format!("&{arg}")
-                        } else {
-                            arg.to_string()
-                        }
+                    .zip(call_ty)
+                    .map(|((arg, is_borrowed), (_, ty))| {
+                        generate_arg(self.resolve, ty, arg, is_borrowed, true)
                     })
                     .collect::<Vec<_>>();
                 // record
@@ -1405,8 +1451,13 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 }
                 self.src.push_str(";\n");
                 self.src.push_str(&format!("proxy::recorder::record::record(\"{func_name}\", &[], &res.to_wave_string());\n"));
-                if func.result.is_some() {
-                    self.src.push_str("res\n");
+                if let Some(ty) = &func.result {
+                    match ty {
+                        Type::Id(id) if self.info(*id).has_resource => {
+                            self.push_str("res.to_export()\n")
+                        }
+                        _ => self.push_str("res\n"),
+                    }
                 }
                 self.src.push_str("}\n");
             } else {
@@ -2188,6 +2239,19 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     .into_iter()
                     .map(|(name, _docs, ty)| (name, ty)),
             );
+            if self.in_import && self.r#gen.opts.proxy_component {
+                let export_path = self.get_proxy_path(id, true);
+                self.print_rust_enum_to_export(
+                    info.has_resource,
+                    &export_path,
+                    mode,
+                    &name,
+                    cases
+                        .clone()
+                        .into_iter()
+                        .map(|(name, _docs, ty)| (name, ty)),
+                );
+            }
 
             if info.error {
                 self.push_str("impl");
@@ -2215,6 +2279,51 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 self.push_str(" {}\n");
             }
         }
+    }
+
+    fn print_rust_enum_to_export<'b>(
+        &mut self,
+        has_resource: bool,
+        export_path: &Option<String>,
+        mode: TypeMode,
+        name: &str,
+        cases: impl IntoIterator<Item = (String, Option<&'b Type>)>,
+    ) {
+        self.push_str("impl");
+        self.print_generics(mode.lifetime);
+        self.push_str(" crate::ToExport for ");
+        self.push_str(name);
+        self.print_generics(mode.lifetime);
+        self.push_str(" {\n");
+        if !has_resource || export_path.is_none() {
+            self.push_str(
+                r#"
+type Output = Self;
+fn to_export(self) -> Self::Output { self }
+}
+"#,
+            );
+            return;
+        }
+        let export_path = export_path.as_ref().unwrap();
+        self.push_str(&format!("type Output = crate::{export_path}::{name};\n"));
+        self.push_str("fn to_export(self) -> Self::Output {\n");
+        self.push_str("match self {\n");
+        for (case_name, payload) in cases {
+            self.push_str(&format!("{name}::{case_name}"));
+            if payload.is_some() {
+                self.push_str("(e)");
+            }
+            self.push_str(" => {\n");
+            self.push_str(&format!("crate::{export_path}::{name}::{case_name}"));
+            if payload.is_some() {
+                self.push_str("(e.to_export())");
+            }
+            self.push_str("}\n");
+        }
+        self.push_str("}\n");
+        self.push_str("}\n");
+        self.push_str("}\n");
     }
 
     fn print_rust_enum_debug<'b>(
@@ -2404,6 +2513,32 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     .map(|c| (c.name.to_upper_camel_case(), None)),
             )
         }
+        if self.in_import && self.r#gen.opts.proxy_component {
+            self.print_rust_enum_to_export(
+                false,
+                &None,
+                TypeMode::owned(),
+                &name,
+                enum_
+                    .cases
+                    .iter()
+                    .map(|c| (c.name.to_upper_camel_case(), None)),
+            );
+        }
+    }
+
+    fn get_proxy_path(&self, id: TypeId, is_export: bool) -> Option<String> {
+        let owner = match self.resolve.types[id].owner {
+            TypeOwner::Interface(i) => {
+                if self.r#gen.proxy_import_only_interfaces.contains(&i) {
+                    return None;
+                }
+                WorldKey::Interface(i)
+            }
+            TypeOwner::World(_) | TypeOwner::None => unreachable!(),
+        };
+        let path = crate::compute_module_path(&owner, self.resolve, is_export).join("::");
+        Some(path)
     }
 
     fn print_typedef_alias(&mut self, id: TypeId, ty: &Type, docs: &Docs) {
@@ -2716,11 +2851,11 @@ impl<'a> wit_bindgen_core::InterfaceGenerator<'a> for InterfaceGenerator<'a> {
                     }
                     TypeOwner::World(_) | TypeOwner::None => unreachable!(),
                 };
+                let path = crate::compute_module_path(&key, self.resolve, true);
+                let path = path.join("::");
                 let target_type = if is_import_only {
                     "&'a ()".to_string()
                 } else {
-                    let path = crate::compute_module_path(&key, self.resolve, true);
-                    let path = path.join("::");
                     format!("crate::{path}::{camel}Borrow<'a>")
                 };
                 uwriteln!(
@@ -2728,6 +2863,18 @@ impl<'a> wit_bindgen_core::InterfaceGenerator<'a> for InterfaceGenerator<'a> {
                     r#"
 /// Only used for proxy component.
 pub type {camel}Borrow<'a> = {target_type};
+impl crate::ToExport for {camel} {{
+  type Output = crate::{path}::{camel};
+  fn to_export(self) -> Self::Output {{
+    Self::Output::new(self)
+  }}
+}}
+impl<'a> crate::ToExport for &'a {camel} {{
+  type Output = crate::{path}::{camel}Borrow<'a>;
+  fn to_export(self) -> Self::Output {{
+    unsafe {{ Self::Output::lift(self.handle() as usize) }}
+  }}
+}}
                 "#
                 );
             }

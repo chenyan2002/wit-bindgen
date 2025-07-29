@@ -430,9 +430,10 @@ impl RustWasm {
         // corresponding import type in the export module
         let import_path = compute_module_path(name, resolve, false);
         for (type_name, ty_id) in resolve.interfaces[id].types.iter() {
-            // Skip resource types, as we need those bindings.
-            // Note that the alias for the resource type is still in the remap.
-            if matches!(resolve.types[*ty_id].kind, TypeDefKind::Resource) {
+            // Skip resource/handle types, including the nested resource types.
+            // We need both the import and export resource bindings to ensure correctness.
+            let info = self.types.get(*ty_id);
+            if info.has_resource {
                 continue;
             }
             let full_type_name = full_wit_type_name(resolve, *ty_id);
@@ -448,6 +449,57 @@ impl RustWasm {
     fn emit_wave(&mut self) {
         self.src.push_str(
             r#"
+trait ToExport {
+    type Output;
+    fn to_export(self) -> Self::Output;
+}
+impl<Ok, Err> ToExport for Result<Ok, Err>
+where Ok: ToExport, Err: ToExport {
+    type Output = Result<Ok::Output, Err::Output>;
+    fn to_export(self) -> Self::Output {
+        match self {
+            Ok(ok) => Ok(ok.to_export()),
+            Err(err) => Err(err.to_export()),
+        }
+    }
+}
+macro_rules! impl_to_export_for_primitive {
+    ($($t:ty),*) => {
+        $(
+            impl ToExport for $t {
+                type Output = $t;
+                fn to_export(self) -> Self::Output {
+                    self
+                }
+            }
+        )*
+    };
+}
+impl_to_export_for_primitive!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, (), bool, char);
+impl<'a> ToExport for &'a str {
+    type Output = &'a str;
+    fn to_export(self) -> Self::Output {
+        self
+    }
+}
+macro_rules! impl_to_export_for_tuple {
+    ( $($T:ident, $i:tt),* ) => {
+        impl<$($T: ToExport),*> ToExport for ($($T,)*) {
+            type Output = ($($T::Output,)*);
+            fn to_export(self) -> Self::Output {
+                ($(self.$i.to_export(),)*)
+            }
+        }
+    };
+}
+impl_to_export_for_tuple!(T0, 0);
+impl_to_export_for_tuple!(T0, 0, T1, 1);
+impl_to_export_for_tuple!(T0, 0, T1, 1, T2, 2);
+impl_to_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3);
+impl_to_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4);
+impl_to_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4, T5, 5);
+impl_to_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4, T5, 5, T6, 6);
+
 trait ToWave {
     fn to_wave_string(&self) -> String where Self: std::fmt::Debug {
       format!("{self:?}")
@@ -559,14 +611,50 @@ pub mod wit_stream {{
             RuntimeItem::StringType => {
                 self.rt_module.insert(RuntimeItem::AllocCrate);
                 uwriteln!(self.src, "pub use alloc_crate::string::String;");
+                if self.opts.proxy_component {
+                    self.src.push_str(
+                        r#"
+impl crate::ToExport for String {
+    type Output = String;
+    fn to_export(self) -> Self::Output {
+        self
+    }
+}
+"#,
+                    );
+                }
             }
             RuntimeItem::BoxType => {
                 self.rt_module.insert(RuntimeItem::AllocCrate);
                 uwriteln!(self.src, "pub use alloc_crate::boxed::Box;");
+                if self.opts.proxy_component {
+                    self.src.push_str(
+                        r#"
+impl<T> crate::ToExport for Box::<T> where T: crate::ToExport + Clone {
+    type Output = Box::<T::Output>;
+    fn to_export(self) -> Self::Output {
+        Box::new((*self).clone().to_export())
+    }
+}
+"#,
+                    );
+                }
             }
             RuntimeItem::VecType => {
                 self.rt_module.insert(RuntimeItem::AllocCrate);
                 uwriteln!(self.src, "pub use alloc_crate::vec::Vec;");
+                if self.opts.proxy_component {
+                    self.src.push_str(
+                        r#"
+impl<T: crate::ToExport> crate::ToExport for Vec::<T> {
+    type Output = Vec::<T::Output>;
+    fn to_export(self) -> Self::Output {
+        self.into_iter().map(|x| x.to_export()).collect()
+    }
+}
+"#,
+                    );
+                }
             }
             RuntimeItem::CabiDealloc => {
                 self.rt_module.insert(RuntimeItem::StdAllocModule);
