@@ -454,6 +454,12 @@ trait ToExport {
     type Output;
     fn to_export(self) -> Self::Output;
 }
+#[allow(dead_code)]
+trait ToImport<'a> {
+    type Output;
+    fn to_import(&'a self) -> &'a Self::Output;
+    fn to_import_owned(self) -> Self::Output;
+}
 impl<Ok, Err> ToExport for Result<Ok, Err>
 where Ok: ToExport, Err: ToExport {
     type Output = Result<Ok::Output, Err::Output>;
@@ -464,9 +470,25 @@ where Ok: ToExport, Err: ToExport {
         }
     }
 }
-macro_rules! impl_to_export_for_primitive {
+impl<Inner> ToExport for Option<Inner>
+where Inner: ToExport {
+    type Output = Option<Inner::Output>;
+    fn to_export(self) -> Self::Output {
+        self.map(|x| x.to_export())
+    }
+}
+macro_rules! impl_to_import_export_for_primitive {
     ($($t:ty),*) => {
         $(
+            impl<'a> ToImport<'a> for $t {
+                type Output = $t;
+                fn to_import(&'a self) -> &'a Self::Output {
+                    self
+                }
+                fn to_import_owned(self) -> Self::Output {
+                    self
+                }
+            }
             impl ToExport for $t {
                 type Output = $t;
                 fn to_export(self) -> Self::Output {
@@ -476,14 +498,9 @@ macro_rules! impl_to_export_for_primitive {
         )*
     };
 }
-impl_to_export_for_primitive!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, (), bool, char);
-impl<'a> ToExport for &'a str {
-    type Output = &'a str;
-    fn to_export(self) -> Self::Output {
-        self
-    }
-}
-macro_rules! impl_to_export_for_tuple {
+impl_to_import_export_for_primitive!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, (), bool, char);
+
+macro_rules! impl_to_import_export_for_tuple {
     ( $($T:ident, $i:tt),* ) => {
         impl<$($T: ToExport),*> ToExport for ($($T,)*) {
             type Output = ($($T::Output,)*);
@@ -493,13 +510,13 @@ macro_rules! impl_to_export_for_tuple {
         }
     };
 }
-impl_to_export_for_tuple!(T0, 0);
-impl_to_export_for_tuple!(T0, 0, T1, 1);
-impl_to_export_for_tuple!(T0, 0, T1, 1, T2, 2);
-impl_to_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3);
-impl_to_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4);
-impl_to_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4, T5, 5);
-impl_to_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4, T5, 5, T6, 6);
+impl_to_import_export_for_tuple!(T0, 0);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4, T5, 5);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4, T5, 5, T6, 6);
 
 trait ToWave {
     fn to_wave_string(&self) -> String where Self: std::fmt::Debug {

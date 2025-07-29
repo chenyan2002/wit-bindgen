@@ -1326,7 +1326,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 // The real intend is to get is_borrowed in the import signature, but the side effect is
                 // that it also generates the signature in self.src
                 // To work around that, we wrap this code inside a comment region.
-                let (_, is_borrowed) = self.print_signature(func, async_, &sig);
+                let (_, is_borrowed) = self.print_signature(func, false, &sig);
                 self.src.push_str("*/\n");
                 let (call_params, call_ty) = if matches!(
                     func.kind,
@@ -1336,61 +1336,26 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 } else {
                     (params.as_slice(), func.params.as_slice())
                 };
-                fn generate_arg(
-                    resolve: &Resolve,
-                    ty: &Type,
-                    arg: &str,
-                    is_borrowed: bool,
-                    to_import: bool,
-                ) -> String {
-                    // TODO handle nested resource/handle types
-                    if let Type::Id(orig_id) = ty {
-                        let final_id = dealias(resolve, *orig_id);
-                        if to_import {
-                            match resolve.types[final_id].kind {
-                                TypeDefKind::Handle(Handle::Borrow(_)) => {
-                                    return format!("{arg}.get()")
-                                }
-                                TypeDefKind::Handle(Handle::Own(_)) => {
-                                    return format!("{arg}.into_inner()")
-                                }
-                                _ => (),
-                            }
-                        } else {
-                            let info = match resolve.types[final_id].kind {
-                                TypeDefKind::Handle(Handle::Borrow(id)) => Some((id, true)),
-                                TypeDefKind::Handle(Handle::Own(id)) => Some((id, false)),
-                                _ => None,
-                            };
-                            if let Some((id, is_borrowed)) = info {
-                                let key = match resolve.types[id].owner {
-                                    TypeOwner::Interface(id) => WorldKey::Interface(id),
-                                    TypeOwner::World(_) | TypeOwner::None => unreachable!(),
-                                };
-                                let path =
-                                    crate::compute_module_path(&key, resolve, true).join("::");
-                                let name = resolve.types[id].name.as_ref().unwrap();
-                                let camel = to_upper_camel_case(&name);
-                                if is_borrowed {
-                                    return format!("crate::{path}::{camel}Borrow::new({arg})");
-                                } else {
-                                    return format!("crate::{path}::{camel}::new({arg})");
-                                }
-                            }
-                        }
-                    }
-                    if is_borrowed {
-                        format!("&{arg}")
-                    } else {
-                        arg.to_string()
-                    }
-                }
                 let call_args = call_params
                     .iter()
                     .zip(is_borrowed)
                     .zip(call_ty)
                     .map(|((arg, is_borrowed), (_, ty))| {
-                        generate_arg(self.resolve, ty, arg, is_borrowed, true)
+                        if let Type::Id(id) = ty {
+                            let info = self.info(*id);
+                            if info.has_resource {
+                                if info.has_borrow_handle {
+                                    return format!("{arg}.to_import()");
+                                } else {
+                                    return format!("{arg}.to_import_owned()");
+                                }
+                            }
+                        }
+                        if is_borrowed {
+                            format!("&{arg}")
+                        } else {
+                            arg.to_string()
+                        }
                     })
                     .collect::<Vec<_>>();
                 // record
@@ -2860,23 +2825,32 @@ impl<'a> wit_bindgen_core::InterfaceGenerator<'a> for InterfaceGenerator<'a> {
             if self.r#gen.opts.proxy_component {
                 let export_path = self.get_proxy_path(id, true);
                 if let Some(path) = export_path {
+                    // No ToExport for borrow type, as return is always owned
                     uwriteln!(
                         self.src,
                         r#"
-/// Only used for proxy component.
 impl crate::ToExport for {camel} {{
   type Output = crate::{path}::{camel};
   fn to_export(self) -> Self::Output {{
     Self::Output::new(self)
   }}
-}}
-impl<'a> crate::ToExport for &'a {camel} {{
-  type Output = crate::{path}::{camel}Borrow<'a>;
-  fn to_export(self) -> Self::Output {{
-    unsafe {{ Self::Output::lift(self.handle() as usize) }}
+}}"#
+                    );
+                } else {
+                    // import-only module
+                    uwriteln!(
+                        self.src,
+                        r#"
+impl<'a> crate::ToImport<'a> for {camel} {{
+  type Output = Self;
+  fn to_import(&'a self) -> &'a Self::Output {{
+    self
+  }}
+  fn to_import_owned(self) -> Self::Output {{
+    self
   }}
 }}
-                "#
+"#
                     );
                 }
             }
@@ -3013,6 +2987,34 @@ impl<'a> {camel}Borrow<'a>{{
 }}
                 "#
             );
+            if self.r#gen.opts.proxy_component {
+                let import_path = self.get_proxy_path(id, false);
+                if let Some(path) = import_path {
+                    uwriteln!(
+                        self.src,
+                        r#"
+impl<'a> crate::ToImport<'a> for {camel} {{
+  type Output = crate::{path}::{camel};
+  fn to_import_owned(self) -> Self::Output {{
+    self.into_inner()
+  }}
+  fn to_import(&'a self) -> &'a Self::Output {{
+    self.get()
+  }}
+}}
+impl<'a> crate::ToImport<'a> for {camel}Borrow<'a> {{
+  type Output = crate::{path}::{camel};
+  fn to_import(&'a self) -> &'a Self::Output {{
+    self.get()
+  }}
+  fn to_import_owned(self) -> Self::Output {{
+    unreachable!()
+  }}
+}}
+"#
+                    );
+                }
+            }
             format!("[export]{module}")
         };
 
