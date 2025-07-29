@@ -2155,6 +2155,36 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 self.push_str(&name);
                 self.push_str(" {}\n");
             }
+            if self.r#gen.opts.proxy_component && self.in_import {
+                let export_path = self.get_proxy_path(id, true);
+                self.push_str("impl");
+                self.print_generics(mode.lifetime);
+                self.push_str(" crate::ToExport for ");
+                self.push_str(&name);
+                self.print_generics(mode.lifetime);
+                self.push_str(" {\n");
+                if !info.has_resource || export_path.is_none() {
+                    self.push_str(
+                        r#"
+type Output = Self;
+fn to_export(self) -> Self::Output { self }
+}
+"#,
+                    );
+                    return;
+                }
+                let export_path = export_path.as_ref().unwrap();
+                self.push_str(&format!("type Output = crate::{export_path}::{name};\n"));
+                self.push_str("fn to_export(self) -> Self::Output {\n");
+                self.push_str("Self::Output {\n");
+                for field in record.fields.iter() {
+                    let field_name = to_rust_ident(&field.name);
+                    self.push_str(&format!("{field_name}: self.{field_name}.to_export(),\n"));
+                }
+                self.push_str("}\n");
+                self.push_str("}\n");
+                self.push_str("}\n");
+            }
         }
     }
 
@@ -2310,7 +2340,7 @@ fn to_export(self) -> Self::Output { self }
                 self.push_str("(e)");
             }
             self.push_str(" => {\n");
-            self.push_str(&format!("crate::{export_path}::{name}::{case_name}"));
+            self.push_str(&format!("Self::Output::{case_name}"));
             if payload.is_some() {
                 self.push_str("(e.to_export())");
             }

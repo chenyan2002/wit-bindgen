@@ -446,9 +446,10 @@ impl RustWasm {
         }
         Ok(())
     }
-    fn emit_wave(&mut self) {
+    fn emit_proxy_traits(&mut self) {
         self.src.push_str(
             r#"
+#[allow(dead_code)]
 trait ToExport {
     type Output;
     fn to_export(self) -> Self::Output;
@@ -1465,7 +1466,7 @@ impl WorldGenerator for RustWasm {
         self.finish_runtime_module();
         self.finish_export_macro(resolve, world);
         if self.opts.proxy_component {
-            self.emit_wave();
+            self.emit_proxy_traits();
         }
 
         // This is a bit tricky, but we sometimes want to "split" the `world` in
