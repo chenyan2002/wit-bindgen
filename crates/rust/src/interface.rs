@@ -1320,11 +1320,6 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             let (params, _) = self.print_signature(func, true, &sig);
             if self.r#gen.opts.proxy_component {
                 let func_name = to_rust_ident(&func.item_name());
-                // TODO: find a way to convert Borrow to &
-                if func_name == "filesystem_error_code" {
-                    self.src.push_str("{ todo!() }\n");
-                    continue;
-                }
                 self.src.push_str(" {\n");
                 // align export and import arguments
                 self.src.push_str("/* import signature: ");
