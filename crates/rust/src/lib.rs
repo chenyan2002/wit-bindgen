@@ -1335,14 +1335,7 @@ impl WorldGenerator for RustWasm {
         for (name, ty_id) in resolve.interfaces[id].types.iter() {
             let full_name = full_wit_type_name(resolve, *ty_id);
             if let Some(type_gen) = self.with.get(&full_name) {
-                // skip type definition generation for remapped types
-                // When proxy_component is enabled, if the type alias points a resource,
-                // the type alias needs to be generated even though it is remapped.
-                let final_ty = dealias(resolve, *ty_id);
-                if type_gen.generated()
-                    || (self.opts.proxy_component
-                        && resolve.types[final_ty].kind == TypeDefKind::Resource)
-                {
+                if type_gen.generated() {
                     to_define.push((name, ty_id));
                 }
             } else {
