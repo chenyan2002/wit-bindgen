@@ -131,6 +131,10 @@ enum PayloadFor {
     Future,
     Stream,
 }
+enum ProxyPath {
+    TypeId(TypeId),
+    Key(WorldKey),
+}
 
 impl<'i> InterfaceGenerator<'i> {
     pub(super) fn generate_exports<'a>(
@@ -1259,8 +1263,10 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                         _ => continue,
                     }
                     let camel = name.to_upper_camel_case();
-                    let stub = if self.r#gen.opts.proxy_component {
-                        let mut path = crate::compute_module_path(key, self.resolve, false);
+                    let stub = if self.r#gen.opts.proxy_component.is_some() {
+                        let mut path = self
+                            .get_proxy_path(ProxyPath::Key(key.clone()), false)
+                            .unwrap();
                         path.push(camel.clone());
                         path.join("::")
                     } else {
@@ -1318,7 +1324,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             sig.update_for_func(&func);
             self.src.push_str("#[allow(unused_variables)]\n");
             let (params, _) = self.print_signature(func, true, &sig);
-            if self.r#gen.opts.proxy_component {
+            if self.r#gen.opts.proxy_component.is_some() {
                 let func_name = to_rust_ident(&func.item_name());
                 self.src.push_str(" {\n");
                 // align export and import arguments
@@ -1375,7 +1381,8 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 self.src.push_str("\", &params, \"\");\n");
                 // call import functions
                 let mut import_path = if let Some((_, world_key)) = interface {
-                    crate::compute_module_path(world_key, self.resolve, false)
+                    self.get_proxy_path(ProxyPath::Key(world_key.clone()), false)
+                        .unwrap()
                 } else {
                     vec![]
                 }
@@ -2120,8 +2127,8 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 self.push_str(&name);
                 self.push_str(" {}\n");
             }
-            if self.r#gen.opts.proxy_component && self.in_import {
-                let export_path = self.get_proxy_path(id, true);
+            if self.r#gen.opts.proxy_component.is_some() && self.in_import {
+                let export_path = self.get_proxy_path(ProxyPath::TypeId(id), true);
                 self.push_str("impl");
                 self.print_generics(mode.lifetime);
                 self.push_str(" crate::ToExport for ");
@@ -2138,7 +2145,7 @@ fn to_export(self) -> Self::Output { self }
                     );
                     return;
                 }
-                let export_path = export_path.as_ref().unwrap();
+                let export_path = export_path.as_ref().unwrap().join("::");
                 self.push_str(&format!("type Output = crate::{export_path}::{name};\n"));
                 self.push_str("fn to_export(self) -> Self::Output {\n");
                 self.push_str("Self::Output {\n");
@@ -2229,8 +2236,10 @@ fn to_export(self) -> Self::Output { self }
                     .into_iter()
                     .map(|(name, _docs, ty)| (name, ty)),
             );
-            if self.in_import && self.r#gen.opts.proxy_component {
-                let export_path = self.get_proxy_path(id, true);
+            if self.in_import && self.r#gen.opts.proxy_component.is_some() {
+                let export_path = self
+                    .get_proxy_path(ProxyPath::TypeId(id), true)
+                    .map(|p| p.join("::"));
                 self.print_rust_enum_to_export(
                     info.has_resource,
                     &export_path,
@@ -2503,7 +2512,7 @@ fn to_export(self) -> Self::Output { self }
                     .map(|c| (c.name.to_upper_camel_case(), None)),
             )
         }
-        if self.in_import && self.r#gen.opts.proxy_component {
+        if self.in_import && self.r#gen.opts.proxy_component.is_some() {
             self.print_rust_enum_to_export(
                 false,
                 &None,
@@ -2517,18 +2526,28 @@ fn to_export(self) -> Self::Output { self }
         }
     }
 
-    fn get_proxy_path(&self, id: TypeId, is_export: bool) -> Option<String> {
-        let owner = match self.resolve.types[id].owner {
-            TypeOwner::Interface(i) => {
-                if self.r#gen.proxy_import_only_interfaces.contains(&i) {
-                    return None;
-                }
-                WorldKey::Interface(i)
+    fn get_proxy_path(&self, id: ProxyPath, is_export: bool) -> Option<Vec<String>> {
+        let name = match id {
+            ProxyPath::Key(name) => name,
+            ProxyPath::TypeId(id) => {
+                let owner = match self.resolve.types[id].owner {
+                    TypeOwner::Interface(i) => {
+                        if self.r#gen.proxy_import_only_interfaces.contains(&i) {
+                            return None;
+                        }
+                        WorldKey::Interface(i)
+                    }
+                    TypeOwner::World(_) | TypeOwner::None => unreachable!(),
+                };
+                owner
             }
-            TypeOwner::World(_) | TypeOwner::None => unreachable!(),
         };
-        let path = crate::compute_module_path(&owner, self.resolve, is_export).join("::");
-        Some(path)
+        Some(crate::compute_proxy_path(
+            &name,
+            &self.resolve,
+            self.r#gen.opts.proxy_component.as_ref().unwrap(),
+            is_export,
+        ))
     }
 
     fn print_typedef_alias(&mut self, id: TypeId, ty: &Type, docs: &Docs) {
@@ -2822,10 +2841,11 @@ impl<'a> wit_bindgen_core::InterfaceGenerator<'a> for InterfaceGenerator<'a> {
                     }}
                 "#
             );
-            if self.r#gen.opts.proxy_component {
-                let export_path = self.get_proxy_path(id, true);
+            if self.r#gen.opts.proxy_component.is_some() {
+                let export_path = self.get_proxy_path(ProxyPath::TypeId(id), true);
                 if let Some(path) = export_path {
                     // No ToExport for borrow type, as return is always owned
+                    let path = path.join("::");
                     uwriteln!(
                         self.src,
                         r#"
@@ -2987,9 +3007,10 @@ impl<'a> {camel}Borrow<'a>{{
 }}
                 "#
             );
-            if self.r#gen.opts.proxy_component {
-                let import_path = self.get_proxy_path(id, false);
+            if self.r#gen.opts.proxy_component.is_some() {
+                let import_path = self.get_proxy_path(ProxyPath::TypeId(id), false);
                 if let Some(path) = import_path {
+                    let path = path.join("::");
                     uwriteln!(
                         self.src,
                         r#"
