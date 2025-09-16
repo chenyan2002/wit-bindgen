@@ -1658,6 +1658,13 @@ pub(crate) fn compute_proxy_path(
     }
     path
 }
+pub(crate) fn owner_of_type(id: TypeId, resolve: &Resolve) -> InterfaceId {
+    let owner = match resolve.types[id].owner {
+        TypeOwner::Interface(i) => i,
+        TypeOwner::World(_) | TypeOwner::None => unreachable!(),
+    };
+    owner
+}
 
 enum Identifier<'a> {
     World(WorldId),

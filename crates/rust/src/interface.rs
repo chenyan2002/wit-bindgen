@@ -2530,16 +2530,11 @@ fn to_export(self) -> Self::Output { self }
         let name = match id {
             ProxyPath::Key(name) => name,
             ProxyPath::TypeId(id) => {
-                let owner = match self.resolve.types[id].owner {
-                    TypeOwner::Interface(i) => {
-                        if self.r#gen.proxy_import_only_interfaces.contains(&i) {
-                            return None;
-                        }
-                        WorldKey::Interface(i)
-                    }
-                    TypeOwner::World(_) | TypeOwner::None => unreachable!(),
-                };
-                owner
+                let id = crate::owner_of_type(id, self.resolve);
+                if self.r#gen.proxy_import_only_interfaces.contains(&id) {
+                    return None;
+                }
+                WorldKey::Interface(id)
             }
         };
         Some(crate::compute_proxy_path(
@@ -2858,20 +2853,25 @@ impl crate::ToExport for {camel} {{
                     );
                 } else {
                     // import-only module
-                    uwriteln!(
-                        self.src,
-                        r#"
+                    let name = WorldKey::Interface(crate::owner_of_type(id, self.resolve));
+                    let path = crate::compute_module_path(&name, self.resolve, false);
+                    if !path[0].starts_with("wrapped_") {
+                        let path = path.join("::");
+                        uwriteln!(
+                            self.src,
+                            r#"
 impl<'a> crate::ToImport<'a> for {camel} {{
-  type Output = Self;
-  fn to_import(&'a self) -> &'a Self::Output {{
-    self
-  }}
+  type Output = crate::wrapped_{path}::{camel};
   fn to_import_owned(self) -> Self::Output {{
-    self
+    unsafe {{ Self::Output::from_handle(self.take_handle()) }}
+  }}
+  fn to_import(&'a self) -> &'a Self::Output {{
+    todo!()
   }}
 }}
 "#
-                    );
+                        );
+                    }
                 }
             }
             self.wasm_import_module.to_string()
