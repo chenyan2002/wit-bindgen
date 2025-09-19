@@ -1326,6 +1326,10 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             let (params, _) = self.print_signature(func, true, &sig);
             if self.r#gen.opts.proxy_component.is_some() {
                 let func_name = to_rust_ident(&func.item_name());
+                if func_name == "get_wrapped" && matches!(self.r#gen.opts.proxy_component, Some(crate::ProxyMode::Import)) {
+                    self.src.push_str(" { x.to_export() }\n");
+                    continue;
+                }
                 self.src.push_str(" {\n");
                 // align export and import arguments
                 self.src.push_str("/* import signature: ");
@@ -2863,7 +2867,7 @@ impl crate::ToExport for {camel} {{
 impl<'a> crate::ToImport<'a> for {camel} {{
   type Output = crate::wrapped_{path}::{camel};
   fn to_import_owned(self) -> Self::Output {{
-    unsafe {{ Self::Output::from_handle(self.take_handle()) }}
+    Self::Output::get_wrapped(self)
   }}
   fn to_import(&'a self) -> &'a Self::Output {{
     todo!()
