@@ -1253,6 +1253,25 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
 
         let root_methods = funcs.remove(&None).unwrap_or(Vec::new());
 
+        fn display_interface(
+            resolve: &Resolve,
+            interface: Option<(InterfaceId, &WorldKey)>,
+            resource: Option<&str>,
+        ) -> String {
+            let mut res = match interface {
+                Some((id, _)) => {
+                    let name = resolve.id_of(id).unwrap_or("<anonymous>".to_owned());
+                    name.strip_prefix("wrapped-").unwrap_or(&name).to_string()
+                }
+                None => String::new(),
+            };
+            if let Some(resource) = resource {
+                res.push_str(".");
+                res.push_str(resource);
+            }
+            res
+        }
+
         let mut extra_trait_items = String::new();
         let guest_trait = match interface {
             Some((id, key)) => {
@@ -1276,7 +1295,14 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
 
                     let resource_methods = funcs.remove(&Some(*id)).unwrap_or(Vec::new());
                     let trait_name = format!("{path}::Guest{camel}");
-                    self.generate_stub_impl(&trait_name, "", &resource_methods, interface, &stub);
+                    self.generate_stub_impl(
+                        &trait_name,
+                        "",
+                        &resource_methods,
+                        interface,
+                        &stub,
+                        &display_interface(&self.resolve, interface, Some(&name)),
+                    );
                 }
                 format!("{path}::Guest")
             }
@@ -1293,6 +1319,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 &root_methods,
                 interface,
                 "Stub",
+                &display_interface(&self.resolve, interface, None),
             );
         }
     }
@@ -1304,6 +1331,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
         funcs: &[&Function],
         interface: Option<(InterfaceId, &WorldKey)>,
         stub: &str,
+        display_interface: &str,
     ) {
         uwriteln!(self.src, "impl {trait_name} for {stub} {{");
         self.src.push_str(extra_trait_items);
@@ -1326,7 +1354,12 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             let (params, _) = self.print_signature(func, true, &sig);
             if self.r#gen.opts.proxy_component.is_some() {
                 let func_name = to_rust_ident(&func.item_name());
-                if func_name == "get_wrapped" && matches!(self.r#gen.opts.proxy_component, Some(crate::ProxyMode::Import)) {
+                if func_name == "get_wrapped"
+                    && matches!(
+                        self.r#gen.opts.proxy_component,
+                        Some(crate::ProxyMode::Import)
+                    )
+                {
                     self.src.push_str(" { x.to_export() }\n");
                     continue;
                 }
@@ -1380,8 +1413,9 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 } else {
                     self.src.push_str("let params: Vec<String> = Vec::new();\n");
                 }
+                let display_name = format!("{display_interface}::{}", func.item_name());
                 self.src.push_str("proxy::recorder::record::record(\"");
-                self.src.push_str(&func_name);
+                self.src.push_str(&display_name);
                 self.src.push_str("\", &params, \"\");\n");
                 // call import functions
                 let mut import_path = if let Some((_, world_key)) = interface {
@@ -1421,7 +1455,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     self.src.push_str(".await");
                 }
                 self.src.push_str(";\n");
-                self.src.push_str(&format!("proxy::recorder::record::record(\"{func_name}\", &[], &res.to_wave_string());\n"));
+                self.src.push_str(&format!("proxy::recorder::record::record(\"{display_name}\", &[], &res.to_wave_string());\n"));
                 if let Some(ty) = &func.result {
                     match ty {
                         Type::Id(id) if self.info(*id).has_resource => {
