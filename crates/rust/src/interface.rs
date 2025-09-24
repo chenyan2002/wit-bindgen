@@ -1354,12 +1354,13 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             let (params, _) = self.print_signature(func, true, &sig);
             if self.r#gen.opts.proxy_component.is_some() {
                 let func_name = to_rust_ident(&func.item_name());
-                if func_name == "get_wrapped"
+                if trait_name == "exports::proxy::conversion::conversion::Guest"
                     && matches!(
                         self.r#gen.opts.proxy_component,
                         Some(crate::ProxyMode::Import)
                     )
                 {
+                    assert!(func_name.starts_with("get_wrapped_"));
                     self.src.push_str(" { x.to_export() }\n");
                     continue;
                 }
@@ -2891,17 +2892,18 @@ impl crate::ToExport for {camel} {{
                     );
                 } else {
                     // import-only module
-                    let name = WorldKey::Interface(crate::owner_of_type(id, self.resolve));
-                    let path = crate::compute_module_path(&name, self.resolve, false);
+                    let iface_name = WorldKey::Interface(crate::owner_of_type(id, self.resolve));
+                    let path = crate::compute_module_path(&iface_name, self.resolve, false);
                     if !path[0].starts_with("wrapped_") {
                         let path = path.join("::");
+                        let func_name = to_rust_ident(name);
                         uwriteln!(
                             self.src,
                             r#"
 impl<'a> crate::ToImport<'a> for {camel} {{
   type Output = crate::wrapped_{path}::{camel};
   fn to_import_owned(self) -> Self::Output {{
-    Self::Output::get_wrapped(self)
+    crate::proxy::conversion::conversion::get_wrapped_{func_name}(self)
   }}
   fn to_import(&'a self) -> &'a Self::Output {{
     todo!()

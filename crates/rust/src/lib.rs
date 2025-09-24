@@ -1250,6 +1250,9 @@ impl WorldGenerator for RustWasm {
                 .filter_map(|(_, item)| {
                     if let WorldItem::Interface { id, .. } = item {
                         let name = resolve.canonicalized_id_of(*id).unwrap();
+                        if name.starts_with("proxy:") {
+                            return None;
+                        }
                         Some((name, *id))
                     } else {
                         None
@@ -1259,6 +1262,9 @@ impl WorldGenerator for RustWasm {
             for (_, item) in world.exports.iter() {
                 if let WorldItem::Interface { id, .. } = item {
                     let name = resolve.canonicalized_id_of(*id).unwrap();
+                    if name.starts_with("proxy:") {
+                        continue;
+                    }
                     let import_name = match mode {
                         ProxyMode::Import => name.strip_prefix("wrapped-").unwrap().to_owned(),
                         ProxyMode::Export => "wrapped-".to_string() + &name,
@@ -1271,7 +1277,7 @@ impl WorldGenerator for RustWasm {
             // For export proxy, we can have more imports than exports due to transitive dependency.
             // Also the logging interface is always import only.
             match mode {
-                ProxyMode::Import => assert!(imports.len() == 1),
+                ProxyMode::Import => assert!(imports.is_empty()),
                 ProxyMode::Export => {
                     self.proxy_import_only_interfaces = imports.into_values().collect();
                 }
