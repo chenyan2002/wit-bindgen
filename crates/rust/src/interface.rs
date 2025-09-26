@@ -1403,6 +1403,11 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     })
                     .collect::<Vec<_>>();
                 // record
+                let record_export = match self.r#gen.opts.proxy_component {
+                    Some(crate::ProxyMode::Export) => "true",
+                    Some(crate::ProxyMode::Import) => "false",
+                    None => unreachable!(),
+                };
                 if !call_params.is_empty() {
                     self.src.push_str("use crate::ToWave;\n");
                     self.src
@@ -1415,9 +1420,12 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     self.src.push_str("let params: Vec<String> = Vec::new();\n");
                 }
                 let display_name = format!("{display_interface}::{}", func.item_name());
-                self.src.push_str("proxy::recorder::record::record(\"");
+                self.src
+                    .push_str("proxy::recorder::record::record_args(Some(\"");
                 self.src.push_str(&display_name);
-                self.src.push_str("\", &params, \"\");\n");
+                self.src.push_str("\"), &params.join(\", \"), ");
+                self.src.push_str(record_export);
+                self.src.push_str(");\n");
                 // call import functions
                 let mut import_path = if let Some((_, world_key)) = interface {
                     self.get_proxy_path(ProxyPath::Key(world_key.clone()), false)
@@ -1456,7 +1464,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     self.src.push_str(".await");
                 }
                 self.src.push_str(";\n");
-                self.src.push_str(&format!("proxy::recorder::record::record(\"{display_name}\", &[], &res.to_wave_string());\n"));
+                self.src.push_str(&format!("proxy::recorder::record::record_ret(Some(\"{display_name}\"), &res.to_wave_string(), {record_export});\n"));
                 if let Some(ty) = &func.result {
                     match ty {
                         Type::Id(id) if self.info(*id).has_resource => {
