@@ -532,27 +532,6 @@ impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3);
 impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4);
 impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4, T5, 5);
 impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4, T5, 5, T6, 6);
-
-trait ToWave {
-    fn to_wave_string(&self) -> String where Self: std::fmt::Debug {
-      format!("{self:?}")
-    }
-}
-impl<T: std::fmt::Debug> ToWave for T {}
-/*
-impl<T: ToWave> ToWave for &T {}
-impl<T: ToWave> ToWave for Vec<T> {}
-impl<T: ToWave> ToWave for Option<T> {}
-impl<T: ToWave> ToWave for &[T] {}
-impl ToWave for &str {}
-impl ToWave for String {}
-impl ToWave for u8 {}
-impl ToWave for u16 {}
-impl ToWave for u32 {}
-impl ToWave for u64 {}
-impl ToWave for () {}
-impl<T: ToWave, E: ToWave> ToWave for std::result::Result<T, E> {}
-*/
 "#,
         );
     }
@@ -1283,6 +1262,8 @@ impl WorldGenerator for RustWasm {
                 }
             }
             uwriteln!(self.src_preamble, "//   * proxy_component: {mode:?}");
+            uwriteln!(self.src_preamble, "#[allow(unused_imports)]");
+            uwriteln!(self.src_preamble, "use wasm_wave::value::{{Value, Type}};");
         }
         for opt in self.opts.async_.debug_opts() {
             uwriteln!(self.src_preamble, "//   * async: {opt}");

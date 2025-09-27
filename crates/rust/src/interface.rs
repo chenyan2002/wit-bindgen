@@ -1409,12 +1409,12 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     None => unreachable!(),
                 };
                 if !call_params.is_empty() {
-                    self.src.push_str("use crate::ToWave;\n");
                     self.src
                         .push_str("let mut params: Vec<String> = Vec::new();\n");
                     for param in call_params {
-                        self.src
-                            .push_str(&format!("params.push({param}.to_wave_string());\n"));
+                        self.src.push_str(&format!(
+                            "params.push(wasm_wave::to_string(&Value::from(&{param})).unwrap());\n"
+                        ));
                     }
                 } else {
                     self.src.push_str("let params: Vec<String> = Vec::new();\n");
@@ -1464,7 +1464,10 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     self.src.push_str(".await");
                 }
                 self.src.push_str(";\n");
-                self.src.push_str(&format!("proxy::recorder::record::record_ret(Some(\"{display_name}\"), &res.to_wave_string(), {record_export});\n"));
+                self.src.push_str(
+                    "let wave_res = wasm_wave::to_string(&Value::from(&res)).unwrap();\n",
+                );
+                self.src.push_str(&format!("proxy::recorder::record::record_ret(Some(\"{display_name}\"), &wave_res, {record_export});\n"));
                 if let Some(ty) = &func.result {
                     match ty {
                         Type::Id(id) if self.info(*id).has_resource => {
@@ -2283,20 +2286,31 @@ fn to_export(self) -> Self::Output { self }
                     .into_iter()
                     .map(|(name, _docs, ty)| (name, ty)),
             );
-            if self.in_import && self.r#gen.opts.proxy_component.is_some() {
-                let export_path = self
-                    .get_proxy_path(ProxyPath::TypeId(id), true)
-                    .map(|p| p.join("::"));
-                self.print_rust_enum_to_export(
-                    info.has_resource,
-                    &export_path,
-                    mode,
-                    &name,
-                    cases
-                        .clone()
-                        .into_iter()
-                        .map(|(name, _docs, ty)| (name, ty)),
-                );
+            if self.r#gen.opts.proxy_component.is_some() {
+                /*self.print_rust_enum_wave(
+                mode,
+                &name,
+                cases
+                    .clone()
+                    .into_iter()
+                    .map(|(name, _docs, ty)| (name, ty)),
+                    false,
+                );*/
+                if self.in_import {
+                    let export_path = self
+                        .get_proxy_path(ProxyPath::TypeId(id), true)
+                        .map(|p| p.join("::"));
+                    self.print_rust_enum_to_export(
+                        info.has_resource,
+                        &export_path,
+                        mode,
+                        &name,
+                        cases
+                            .clone()
+                            .into_iter()
+                            .map(|(name, _docs, ty)| (name, ty)),
+                    );
+                }
             }
 
             if info.error {
@@ -2343,8 +2357,7 @@ fn to_export(self) -> Self::Output { self }
         self.push_str(" {\n");
         if !has_resource || export_path.is_none() {
             self.push_str(
-                r#"
-type Output = Self;
+                r#"type Output = Self;
 fn to_export(self) -> Self::Output { self }
 }
 "#,
@@ -2365,6 +2378,60 @@ fn to_export(self) -> Self::Output { self }
             if payload.is_some() {
                 self.push_str("(e.to_export())");
             }
+            self.push_str("}\n");
+        }
+        self.push_str("}\n");
+        self.push_str("}\n");
+        self.push_str("}\n");
+    }
+
+    fn print_rust_enum_wave<'b>(
+        &mut self,
+        mode: TypeMode,
+        name: &str,
+        cases: &[(String, Option<&'b Type>)],
+        is_enum: bool,
+    ) where
+        Self: Sized,
+    {
+        self.push_str("impl");
+        self.print_generics(mode.lifetime);
+        self.push_str(" wasm_wave::value::convert::ValueTyped for ");
+        self.push_str(name);
+        self.print_generics(mode.lifetime);
+        self.push_str(" {\n");
+        self.push_str("fn value_type() -> crate::Type {\n");
+        self.push_str("let cases = vec![");
+        for (case_name, payload) in cases {
+            self.push_str(&format!("\"{case_name}\", "));
+        }
+        self.push_str("];\n");
+        self.push_str("crate::Type::enum_ty(cases).unwrap()\n");
+        self.push_str("}\n");
+        self.push_str("}\n");
+
+        self.push_str("impl");
+        self.print_generics(mode.lifetime);
+        self.push_str(&format!(" From<{name}"));
+        self.print_generics(mode.lifetime);
+        self.push_str("> for crate::Value {\n");
+        self.push_str(&format!("fn from(value: {name}"));
+        self.print_generics(mode.lifetime);
+        self.push_str(") -> Self {\n");
+        self.push_str("use wasm_wave::{value::convert::ValueTyped, wasm::WasmValue};\n");
+        self.push_str(&format!("let ty = {name}::value_type();\n"));
+        self.push_str("match value {\n");
+        for (case_name, payload) in cases {
+            self.push_str(name);
+            self.push_str("::");
+            self.push_str(&case_name.to_upper_camel_case());
+            if payload.is_some() {
+                self.push_str("(e)");
+            }
+            self.push_str(" => {\n");
+            self.push_str(&format!(
+                "crate::Value::make_enum(&ty, \"{case_name}\").unwrap()"
+            ));
             self.push_str("}\n");
         }
         self.push_str("}\n");
@@ -2559,17 +2626,29 @@ fn to_export(self) -> Self::Output { self }
                     .map(|c| (c.name.to_upper_camel_case(), None)),
             )
         }
-        if self.in_import && self.r#gen.opts.proxy_component.is_some() {
-            self.print_rust_enum_to_export(
-                false,
-                &None,
+        if self.r#gen.opts.proxy_component.is_some() {
+            self.print_rust_enum_wave(
                 TypeMode::owned(),
                 &name,
-                enum_
+                &enum_
                     .cases
                     .iter()
-                    .map(|c| (c.name.to_upper_camel_case(), None)),
+                    .map(|c| (c.name.clone(), None))
+                    .collect::<Vec<_>>(),
+                true,
             );
+            if self.in_import {
+                self.print_rust_enum_to_export(
+                    false,
+                    &None,
+                    TypeMode::owned(),
+                    &name,
+                    enum_
+                        .cases
+                        .iter()
+                        .map(|c| (c.name.to_upper_camel_case(), None)),
+                );
+            }
         }
     }
 
