@@ -26,9 +26,20 @@ struct InterfaceName {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum ProxyMode {
-    Import,
-    Export,
+    RecordImport,
+    RecordExport,
+    ReplayImport,
+    ReplayExport,
+}
+impl ProxyMode {
+    pub fn is_record(&self) -> bool {
+        matches!(self, ProxyMode::RecordImport | ProxyMode::RecordExport)
+    }
+    pub fn is_replay(&self) -> bool {
+        matches!(self, ProxyMode::ReplayImport | ProxyMode::ReplayExport)
+    }
 }
 
 #[derive(Default)]
@@ -143,14 +154,6 @@ fn parse_with(s: &str) -> Result<(String, WithOption), String> {
         other => WithOption::Path(other.to_string()),
     };
     Ok((k.to_string(), v))
-}
-#[cfg(feature = "clap")]
-fn parse_proxy_mode(s: &str) -> Result<ProxyMode, String> {
-    match s {
-        "import" => Ok(ProxyMode::Import),
-        "export" => Ok(ProxyMode::Export),
-        other => Err(format!("expected `import` or `export`; got `{other}`")),
-    }
 }
 
 #[derive(Default, Debug, Clone)]
@@ -286,7 +289,7 @@ pub struct Opts {
     pub disable_custom_section_link_helpers: bool,
 
     /// Whether or not to generate a `proxy_component`.
-    #[cfg_attr(feature = "clap", clap(long, value_parser = parse_proxy_mode))]
+    #[cfg_attr(feature = "clap", clap(long))]
     pub proxy_component: Option<ProxyMode>,
 
     #[cfg_attr(feature = "clap", clap(flatten))]
@@ -443,6 +446,7 @@ impl RustWasm {
         // For each type in the interface, add a `with` mapping to reuse the
         // corresponding import type in the export module
         let mode = self.opts.proxy_component.as_ref().unwrap();
+        assert!(mode.is_record());
         let import_path = compute_proxy_path(name, resolve, mode, false);
         for (type_name, ty_id) in resolve.interfaces[id].types.iter() {
             // Skip resource/handle types, including the nested resource types.
@@ -1222,43 +1226,49 @@ impl WorldGenerator for RustWasm {
                 panic!("`proxy_component` requires `stubs` to be enabled");
             }
             let world = &resolve.worlds[world];
-            // check if all exports appear in the imports
-            let mut imports: HashMap<_, _> = world
-                .imports
-                .iter()
-                .filter_map(|(_, item)| {
+            if mode.is_record() {
+                // check if all exports appear in the imports
+                let mut imports: HashMap<_, _> = world
+                    .imports
+                    .iter()
+                    .filter_map(|(_, item)| {
+                        if let WorldItem::Interface { id, .. } = item {
+                            let name = resolve.canonicalized_id_of(*id).unwrap();
+                            if name.starts_with("proxy:") {
+                                return None;
+                            }
+                            Some((name, *id))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for (_, item) in world.exports.iter() {
                     if let WorldItem::Interface { id, .. } = item {
                         let name = resolve.canonicalized_id_of(*id).unwrap();
                         if name.starts_with("proxy:") {
-                            return None;
+                            continue;
                         }
-                        Some((name, *id))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for (_, item) in world.exports.iter() {
-                if let WorldItem::Interface { id, .. } = item {
-                    let name = resolve.canonicalized_id_of(*id).unwrap();
-                    if name.starts_with("proxy:") {
-                        continue;
-                    }
-                    let import_name = match mode {
-                        ProxyMode::Import => name.strip_prefix("wrapped-").unwrap().to_owned(),
-                        ProxyMode::Export => "wrapped-".to_string() + &name,
-                    };
-                    if imports.remove(&import_name).is_none() {
-                        panic!("{name} is only in the export, but not in the import");
+                        let import_name = match mode {
+                            ProxyMode::RecordImport => {
+                                name.strip_prefix("wrapped-").unwrap().to_owned()
+                            }
+                            ProxyMode::RecordExport => "wrapped-".to_string() + &name,
+                            _ => unreachable!(),
+                        };
+                        if imports.remove(&import_name).is_none() {
+                            panic!("{name} is only in the export, but not in the import");
+                        }
                     }
                 }
-            }
-            // For export proxy, we can have more imports than exports due to transitive dependency.
-            // Also the logging interface is always import only.
-            match mode {
-                ProxyMode::Import => assert!(imports.is_empty()),
-                ProxyMode::Export => {
-                    self.proxy_import_only_interfaces = imports.into_values().collect();
+                // For export proxy, we can have more imports than exports due to transitive dependency.
+                // Also the logging interface is always import only.
+                match mode {
+                    ProxyMode::RecordImport => assert!(imports.is_empty()),
+                    ProxyMode::RecordExport => {
+                        self.proxy_import_only_interfaces = imports.into_values().collect();
+                    }
+                    _ => unreachable!(),
                 }
             }
             uwriteln!(self.src_preamble, "//   * proxy_component: {mode:?}");
@@ -1474,7 +1484,12 @@ impl WorldGenerator for RustWasm {
             self.import_funcs(resolve, world, &[], files);
         }
 
-        if self.opts.proxy_component.is_some() {
+        if self
+            .opts
+            .proxy_component
+            .as_ref()
+            .is_some_and(|m| m.is_record())
+        {
             let world = &resolve.worlds[world];
             for (name, id) in world.exports.iter() {
                 if let WorldItem::Interface { id, .. } = id {
@@ -1630,18 +1645,19 @@ pub(crate) fn compute_proxy_path(
 ) -> Vec<String> {
     let mut path = crate::compute_module_path(&name, resolve, is_export);
     match (mode, is_export) {
-        (ProxyMode::Import, true) => path[1] = "wrapped_".to_string() + &path[1],
-        (ProxyMode::Import, false) => {
+        (ProxyMode::RecordImport, true) => path[1] = "wrapped_".to_string() + &path[1],
+        (ProxyMode::RecordImport, false) => {
             if let Some(name) = path[0].strip_prefix("wrapped_") {
                 path[0] = name.to_string();
             }
         }
-        (ProxyMode::Export, false) => path[0] = "wrapped_".to_string() + &path[0],
-        (ProxyMode::Export, true) => {
+        (ProxyMode::RecordExport, false) => path[0] = "wrapped_".to_string() + &path[0],
+        (ProxyMode::RecordExport, true) => {
             if let Some(name) = path[1].strip_prefix("wrapped_") {
                 path[1] = name.to_string();
             }
         }
+        (_, _) => unreachable!(),
     }
     path
 }

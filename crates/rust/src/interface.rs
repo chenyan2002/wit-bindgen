@@ -1,7 +1,7 @@
 use crate::bindgen::{FunctionBindgen, POINTER_SIZE_EXPRESSION};
 use crate::{
     full_wit_type_name, int_repr, to_rust_ident, to_upper_camel_case, wasm_type, FnSig, Identifier,
-    InterfaceName, Ownership, RuntimeItem, RustFlagsRepr, RustWasm, TypeGeneration,
+    InterfaceName, Ownership, ProxyMode, RuntimeItem, RustFlagsRepr, RustWasm, TypeGeneration,
 };
 use anyhow::Result;
 use heck::*;
@@ -1282,14 +1282,18 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                         _ => continue,
                     }
                     let camel = name.to_upper_camel_case();
-                    let stub = if self.r#gen.opts.proxy_component.is_some() {
-                        let mut path = self
-                            .get_proxy_path(ProxyPath::Key(key.clone()), false)
-                            .unwrap();
-                        path.push(camel.clone());
-                        path.join("::")
-                    } else {
-                        "Stub".to_string()
+                    let stub = match self.r#gen.opts.proxy_component {
+                        Some(ProxyMode::RecordImport) | Some(ProxyMode::RecordExport) => {
+                            let mut path = self
+                                .get_proxy_path(ProxyPath::Key(key.clone()), false)
+                                .unwrap();
+                            path.push(camel.clone());
+                            path.join("::")
+                        }
+                        Some(ProxyMode::ReplayImport) | Some(ProxyMode::ReplayExport) => {
+                            "MockedResource".to_string()
+                        }
+                        None => "Stub".to_string(),
                     };
                     uwriteln!(extra_trait_items, "type {camel} = {stub};");
 
@@ -1352,133 +1356,158 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             sig.update_for_func(&func);
             self.src.push_str("#[allow(unused_variables)]\n");
             let (params, _) = self.print_signature(func, true, &sig);
-            if self.r#gen.opts.proxy_component.is_some() {
-                let func_name = to_rust_ident(&func.item_name());
-                if trait_name == "exports::proxy::conversion::conversion::Guest"
-                    && matches!(
-                        self.r#gen.opts.proxy_component,
-                        Some(crate::ProxyMode::Import)
-                    )
+            let func_name = to_rust_ident(&func.item_name());
+            match self.r#gen.opts.proxy_component {
+                Some(ProxyMode::ReplayImport) | Some(ProxyMode::ReplayExport) => {
+                    if func.result.is_some() {
+                        let idx = self.src.as_str().rfind(" -> ").unwrap();
+                        let ret_type = self.src[idx + 4..].to_string();
+                        self.src.push_str(" {\n");
+                        self.src
+                            .push_str("use wasm_wave::value::convert::{ToRust, ValueTyped};\n");
+                        self.src.push_str(
+                            "let wave = proxy::recorder::replay::replay(None, None, false);\n",
+                        );
+                        self.src.push_str("let val: Value = wasm_wave::from_str(");
+                        self.src
+                            .push_str(&format!("&{ret_type}::value_type(), &wave"));
+                        self.src.push_str(").unwrap();\n");
+                        self.src.push_str(&format!("{ret_type}::to_rust(&val)\n"));
+                        self.src.push_str("}\n");
+                    } else {
+                        self.src.push_str(" {\n");
+                        self.src.push_str(
+                            "let wave = proxy::recorder::replay::replay(None, None, false);\n",
+                        );
+                        self.src.push_str("assert!(wave.is_empty());\n");
+                        self.src.push_str("}\n");
+                    }
+                }
+                Some(ProxyMode::RecordImport)
+                    if trait_name == "exports::proxy::conversion::conversion::Guest" =>
                 {
                     assert!(func_name.starts_with("get_wrapped_"));
                     self.src.push_str(" { x.to_export() }\n");
                     continue;
                 }
-                self.src.push_str(" {\n");
-                // align export and import arguments
-                self.src.push_str("/* import signature: ");
-                // The real intend is to get is_borrowed in the import signature, but the side effect is
-                // that it also generates the signature in self.src
-                // To work around that, we wrap this code inside a comment region.
-                let (_, is_borrowed) = self.print_signature(func, false, &sig);
-                self.src.push_str("*/\n");
-                let (call_params, call_ty) = if matches!(
-                    func.kind,
-                    FunctionKind::Method(_) | FunctionKind::AsyncMethod(_)
-                ) {
-                    (&params[1..], &func.params[1..])
-                } else {
-                    (params.as_slice(), func.params.as_slice())
-                };
-                let call_args = call_params
-                    .iter()
-                    .zip(is_borrowed)
-                    .zip(call_ty)
-                    .map(|((arg, is_borrowed), (_, ty))| {
-                        if let Type::Id(id) = ty {
-                            let info = self.info(*id);
-                            if info.has_resource {
-                                if info.has_borrow_handle {
-                                    return format!("{arg}.to_import()");
-                                } else {
-                                    return format!("{arg}.to_import_owned()");
+                Some(ProxyMode::RecordImport) | Some(ProxyMode::RecordExport) => {
+                    self.src.push_str(" {\n");
+                    // align export and import arguments
+                    self.src.push_str("/* import signature: ");
+                    // The real intend is to get is_borrowed in the import signature, but the side effect is
+                    // that it also generates the signature in self.src
+                    // To work around that, we wrap this code inside a comment region.
+                    let (_, is_borrowed) = self.print_signature(func, false, &sig);
+                    self.src.push_str("*/\n");
+                    let (call_params, call_ty) = if matches!(
+                        func.kind,
+                        FunctionKind::Method(_) | FunctionKind::AsyncMethod(_)
+                    ) {
+                        (&params[1..], &func.params[1..])
+                    } else {
+                        (params.as_slice(), func.params.as_slice())
+                    };
+                    let call_args = call_params
+                        .iter()
+                        .zip(is_borrowed)
+                        .zip(call_ty)
+                        .map(|((arg, is_borrowed), (_, ty))| {
+                            if let Type::Id(id) = ty {
+                                let info = self.info(*id);
+                                if info.has_resource {
+                                    if info.has_borrow_handle {
+                                        return format!("{arg}.to_import()");
+                                    } else {
+                                        return format!("{arg}.to_import_owned()");
+                                    }
                                 }
                             }
-                        }
-                        if is_borrowed {
-                            format!("&{arg}")
-                        } else {
-                            arg.to_string()
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                // record
-                let record_export = match self.r#gen.opts.proxy_component {
-                    Some(crate::ProxyMode::Export) => "true",
-                    Some(crate::ProxyMode::Import) => "false",
-                    None => unreachable!(),
-                };
-                if !call_params.is_empty() {
-                    self.src
-                        .push_str("let mut params: Vec<String> = Vec::new();\n");
-                    for param in call_params {
-                        self.src.push_str(&format!(
+                            if is_borrowed {
+                                format!("&{arg}")
+                            } else {
+                                arg.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    // record
+                    let record_export = match self.r#gen.opts.proxy_component {
+                        Some(crate::ProxyMode::RecordExport) => "true",
+                        Some(crate::ProxyMode::RecordImport) => "false",
+                        _ => unreachable!(),
+                    };
+                    if !call_params.is_empty() {
+                        self.src
+                            .push_str("let mut params: Vec<String> = Vec::new();\n");
+                        for param in call_params {
+                            self.src.push_str(&format!(
                             "params.push(wasm_wave::to_string(&Value::from(&{param})).unwrap());\n"
                         ));
-                    }
-                } else {
-                    self.src.push_str("let params: Vec<String> = Vec::new();\n");
-                }
-                let display_name = format!("{display_interface}::{}", func.item_name());
-                self.src
-                    .push_str("proxy::recorder::record::record_args(Some(\"");
-                self.src.push_str(&display_name);
-                self.src.push_str("\"), &params.join(\", \"), ");
-                self.src.push_str(record_export);
-                self.src.push_str(");\n");
-                // call import functions
-                let mut import_path = if let Some((_, world_key)) = interface {
-                    self.get_proxy_path(ProxyPath::Key(world_key.clone()), false)
-                        .unwrap()
-                } else {
-                    vec![]
-                }
-                .join("::");
-                if !import_path.is_empty() {
-                    import_path.push_str("::");
-                }
-                // TODO fix crate:: prefix
-                import_path = "crate::".to_owned() + &import_path;
-                self.src.push_str("let res = ");
-                if let Some(_resource_id) = func.kind.resource() {
-                    match func.kind {
-                        FunctionKind::Method(_) | FunctionKind::AsyncMethod(_) => {
-                            self.src.push_str("self.");
                         }
-                        _ => {
-                            self.src.push_str("Self::");
+                    } else {
+                        self.src.push_str("let params: Vec<String> = Vec::new();\n");
+                    }
+                    let display_name = format!("{display_interface}::{}", func.item_name());
+                    self.src
+                        .push_str("proxy::recorder::record::record_args(Some(\"");
+                    self.src.push_str(&display_name);
+                    self.src.push_str("\"), &params.join(\", \"), ");
+                    self.src.push_str(record_export);
+                    self.src.push_str(");\n");
+                    // call import functions
+                    let mut import_path = if let Some((_, world_key)) = interface {
+                        self.get_proxy_path(ProxyPath::Key(world_key.clone()), false)
+                            .unwrap()
+                    } else {
+                        vec![]
+                    }
+                    .join("::");
+                    if !import_path.is_empty() {
+                        import_path.push_str("::");
+                    }
+                    // TODO fix crate:: prefix
+                    import_path = "crate::".to_owned() + &import_path;
+                    self.src.push_str("let res = ");
+                    if let Some(_resource_id) = func.kind.resource() {
+                        match func.kind {
+                            FunctionKind::Method(_) | FunctionKind::AsyncMethod(_) => {
+                                self.src.push_str("self.");
+                            }
+                            _ => {
+                                self.src.push_str("Self::");
+                            }
+                        }
+                        self.src.push_str(&func_name);
+                        self.src.push_str("(");
+                        self.src.push_str(&call_args.join(", "));
+                        self.src.push_str(")");
+                    } else {
+                        self.src.push_str(&import_path);
+                        self.src.push_str(&to_rust_ident(func.item_name()));
+                        self.src.push_str("(");
+                        self.src.push_str(&call_args.join(", "));
+                        self.src.push_str(")");
+                    }
+                    if async_ {
+                        self.src.push_str(".await");
+                    }
+                    self.src.push_str(";\n");
+                    self.src.push_str(
+                        "let wave_res = wasm_wave::to_string(&Value::from(&res)).unwrap();\n",
+                    );
+                    self.src.push_str(&format!("proxy::recorder::record::record_ret(Some(\"{display_name}\"), &wave_res, {record_export});\n"));
+                    if let Some(ty) = &func.result {
+                        match ty {
+                            Type::Id(id) if self.info(*id).has_resource => {
+                                self.push_str("res.to_export()\n")
+                            }
+                            _ => self.push_str("res\n"),
                         }
                     }
-                    self.src.push_str(&func_name);
-                    self.src.push_str("(");
-                    self.src.push_str(&call_args.join(", "));
-                    self.src.push_str(")");
-                } else {
-                    self.src.push_str(&import_path);
-                    self.src.push_str(&to_rust_ident(func.item_name()));
-                    self.src.push_str("(");
-                    self.src.push_str(&call_args.join(", "));
-                    self.src.push_str(")");
+                    self.src.push_str("}\n");
                 }
-                if async_ {
-                    self.src.push_str(".await");
+                None => {
+                    self.src.push_str("{ unreachable!() }\n");
                 }
-                self.src.push_str(";\n");
-                self.src.push_str(
-                    "let wave_res = wasm_wave::to_string(&Value::from(&res)).unwrap();\n",
-                );
-                self.src.push_str(&format!("proxy::recorder::record::record_ret(Some(\"{display_name}\"), &wave_res, {record_export});\n"));
-                if let Some(ty) = &func.result {
-                    match ty {
-                        Type::Id(id) if self.info(*id).has_resource => {
-                            self.push_str("res.to_export()\n")
-                        }
-                        _ => self.push_str("res\n"),
-                    }
-                }
-                self.src.push_str("}\n");
-            } else {
-                self.src.push_str("{ unreachable!() }\n");
             }
         }
 
