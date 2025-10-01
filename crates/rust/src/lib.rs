@@ -1226,49 +1226,58 @@ impl WorldGenerator for RustWasm {
                 panic!("`proxy_component` requires `stubs` to be enabled");
             }
             let world = &resolve.worlds[world];
-            if mode.is_record() {
-                // check if all exports appear in the imports
-                let mut imports: HashMap<_, _> = world
-                    .imports
-                    .iter()
-                    .filter_map(|(_, item)| {
-                        if let WorldItem::Interface { id, .. } = item {
-                            let name = resolve.canonicalized_id_of(*id).unwrap();
-                            if name.starts_with("proxy:") {
-                                return None;
-                            }
-                            Some((name, *id))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                for (_, item) in world.exports.iter() {
+            let mut imports: HashMap<_, _> = world
+                .imports
+                .iter()
+                .filter_map(|(_, item)| {
                     if let WorldItem::Interface { id, .. } = item {
                         let name = resolve.canonicalized_id_of(*id).unwrap();
                         if name.starts_with("proxy:") {
-                            continue;
+                            return None;
                         }
-                        let import_name = match mode {
-                            ProxyMode::RecordImport => {
-                                name.strip_prefix("wrapped-").unwrap().to_owned()
+                        Some((name, *id))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            match mode {
+                ProxyMode::RecordImport | ProxyMode::RecordExport => {
+                    // check if all exports appear in the imports
+                    for (_, item) in world.exports.iter() {
+                        if let WorldItem::Interface { id, .. } = item {
+                            let name = resolve.canonicalized_id_of(*id).unwrap();
+                            if name.starts_with("proxy:") {
+                                continue;
                             }
-                            ProxyMode::RecordExport => "wrapped-".to_string() + &name,
-                            _ => unreachable!(),
-                        };
-                        if imports.remove(&import_name).is_none() {
-                            panic!("{name} is only in the export, but not in the import");
+                            let import_name = match mode {
+                                ProxyMode::RecordImport => {
+                                    name.strip_prefix("wrapped-").unwrap().to_owned()
+                                }
+                                ProxyMode::RecordExport => "wrapped-".to_string() + &name,
+                                _ => unreachable!(),
+                            };
+                            if imports.remove(&import_name).is_none() {
+                                panic!("{name} is only in the export, but not in the import");
+                            }
                         }
+                    }
+                    // For export proxy, we can have more imports than exports due to transitive dependency.
+                    // Also the logging interface is always import only.
+                    match mode {
+                        ProxyMode::RecordImport => assert!(imports.is_empty()),
+                        ProxyMode::RecordExport => {
+                            self.proxy_import_only_interfaces = imports.into_values().collect();
+                        }
+                        _ => unreachable!(),
                     }
                 }
-                // For export proxy, we can have more imports than exports due to transitive dependency.
-                // Also the logging interface is always import only.
-                match mode {
-                    ProxyMode::RecordImport => assert!(imports.is_empty()),
-                    ProxyMode::RecordExport => {
-                        self.proxy_import_only_interfaces = imports.into_values().collect();
-                    }
-                    _ => unreachable!(),
+                ProxyMode::ReplayImport => {
+                    assert!(imports.is_empty());
+                }
+                ProxyMode::ReplayExport => {
+                    assert!(world.exports.len() == 1);
+                    self.proxy_import_only_interfaces = imports.into_values().collect();
                 }
             }
             uwriteln!(self.src_preamble, "//   * proxy_component: {mode:?}");

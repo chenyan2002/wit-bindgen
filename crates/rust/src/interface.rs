@@ -1244,6 +1244,25 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
         params
     }
 
+    fn display_interface(
+        &self,
+        interface: Option<InterfaceId>,
+        resource: Option<String>,
+    ) -> String {
+        let mut res = match interface {
+            Some(id) => {
+                let name = self.resolve.id_of(id).unwrap_or("<anonymous>".to_owned());
+                name.strip_prefix("wrapped-").unwrap_or(&name).to_string()
+            }
+            None => String::new(),
+        };
+        if let Some(resource) = &resource {
+            res.push_str(".");
+            res.push_str(resource);
+        }
+        res
+    }
+
     pub fn generate_stub<'a>(
         &mut self,
         interface: Option<(InterfaceId, &WorldKey)>,
@@ -1252,25 +1271,6 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
         let mut funcs = super::group_by_resource(funcs.clone());
 
         let root_methods = funcs.remove(&None).unwrap_or(Vec::new());
-
-        fn display_interface(
-            resolve: &Resolve,
-            interface: Option<(InterfaceId, &WorldKey)>,
-            resource: Option<&str>,
-        ) -> String {
-            let mut res = match interface {
-                Some((id, _)) => {
-                    let name = resolve.id_of(id).unwrap_or("<anonymous>".to_owned());
-                    name.strip_prefix("wrapped-").unwrap_or(&name).to_string()
-                }
-                None => String::new(),
-            };
-            if let Some(resource) = resource {
-                res.push_str(".");
-                res.push_str(resource);
-            }
-            res
-        }
 
         let mut extra_trait_items = String::new();
         let guest_trait = match interface {
@@ -1305,7 +1305,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                         &resource_methods,
                         interface,
                         &stub,
-                        &display_interface(&self.resolve, interface, Some(&name)),
+                        &self.display_interface(interface.map(|p| p.0), Some(name.clone())),
                     );
                 }
                 format!("{path}::Guest")
@@ -1323,7 +1323,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                 &root_methods,
                 interface,
                 "Stub",
-                &display_interface(&self.resolve, interface, None),
+                &self.display_interface(interface.map(|p| p.0), None),
             );
         }
     }
@@ -1357,31 +1357,103 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             self.src.push_str("#[allow(unused_variables)]\n");
             let (params, _) = self.print_signature(func, true, &sig);
             let func_name = to_rust_ident(&func.item_name());
+            let display_name = format!("{display_interface}::{}", func.item_name());
             match self.r#gen.opts.proxy_component {
-                Some(ProxyMode::ReplayImport) | Some(ProxyMode::ReplayExport) => {
-                    if func.result.is_some() {
-                        let idx = self.src.as_str().rfind(" -> ").unwrap();
-                        let ret_type = self.src[idx + 4..].to_string();
-                        self.src.push_str(" {\n");
-                        self.src
-                            .push_str("use wasm_wave::value::convert::{ToRust, ValueTyped};\n");
-                        self.src.push_str(
-                            "let wave = proxy::recorder::replay::replay(None, None, false);\n",
-                        );
-                        self.src.push_str("let val: Value = wasm_wave::from_str(");
-                        self.src
-                            .push_str(&format!("&{ret_type}::value_type(), &wave"));
-                        self.src.push_str(").unwrap();\n");
-                        self.src.push_str(&format!("{ret_type}::to_rust(&val)\n"));
-                        self.src.push_str("}\n");
+                Some(ProxyMode::ReplayImport) => {
+                    if let Some(ret_ty) = &func.result {
+                        let ret_type = self.type_name_owned(ret_ty);
+                        self.src.push_str(&format!(
+                            r#" {{
+use wasm_wave::value::convert::{{ToRust, ValueTyped}};
+let wave = proxy::recorder::replay::replay_import(Some("{display_name}"), None).unwrap();
+let val: Value = wasm_wave::from_str(&{ret_type}::value_type(), &wave).unwrap();
+{ret_type}::to_rust(&val)
+}}
+"#
+                        ));
                     } else {
-                        self.src.push_str(" {\n");
-                        self.src.push_str(
-                            "let wave = proxy::recorder::replay::replay(None, None, false);\n",
-                        );
-                        self.src.push_str("assert!(wave.is_empty());\n");
-                        self.src.push_str("}\n");
+                        self.src.push_str(&format!(
+                            r#" {{
+let wave = proxy::recorder::replay::replay_import(Some("{display_name}"), None);
+assert!(wave.is_none());
+}}
+"#
+                        ));
                     }
+                }
+                Some(ProxyMode::ReplayExport) => {
+                    assert!(trait_name == "exports::proxy::recorder::start_replay::Guest");
+                    assert!(func_name == "start");
+                    self.push_str(" {\n");
+                    self.push_str("use wasm_wave::value::convert::{ToRust, ValueTyped};\n");
+                    self.push_str("while let Some((method, args)) = proxy::recorder::replay::replay_export() {\n");
+                    let mut func_names = Vec::new();
+                    let import_only = self.r#gen.proxy_import_only_interfaces.clone();
+                    for id in import_only {
+                        for (_, func) in self.resolve.interfaces[id].functions.iter() {
+                            if matches!(
+                                func.kind,
+                                FunctionKind::Method(_) | FunctionKind::AsyncMethod(_)
+                            ) {
+                                continue;
+                            }
+                            let resource = func
+                                .kind
+                                .resource()
+                                .map(|id| self.resolve.types[id].name.clone().unwrap());
+                            let mut display_func =
+                                self.display_interface(Some(id), resource.clone());
+                            display_func.push_str("::");
+                            display_func.push_str(&func.item_name());
+                            let mut module_path = crate::compute_module_path(
+                                &WorldKey::Interface(id),
+                                &self.resolve,
+                                false,
+                            );
+                            if let Some(resource) = &resource {
+                                module_path.push(to_rust_ident(resource));
+                            }
+                            module_path.push(to_rust_ident(func.item_name()));
+                            let params: Vec<_> = func
+                                .params
+                                .iter()
+                                .map(|(_, ty)| self.type_name_owned(ty))
+                                .collect();
+                            func_names.push((
+                                display_func,
+                                module_path.join("::"),
+                                params,
+                                func.result.is_some(),
+                            ));
+                        }
+                    }
+                    self.push_str("match method.as_str() {\n");
+                    for (name, path, params, has_ret) in func_names {
+                        let mut args = Vec::new();
+                        self.push_str(&format!("\"{name}\" => {{\n"));
+                        for (idx, ty) in params.iter().enumerate() {
+                            let arg = format!("arg{idx}");
+                            self.push_str(&format!("let {arg} = {ty}::to_rust(&wasm_wave::from_str(&{ty}::value_type(), &args[{idx}]).unwrap());\n"));
+                            args.push(arg);
+                        }
+                        self.push_str(&format!("let res = {path}({});\n", args.join(", ")));
+                        self.push_str(&format!("let expected = proxy::recorder::replay::assert_export_ret(Some(\"{display_name}\"));\n"));
+                        self.push_str("if let Some(expected) = expected {\n");
+                        if has_ret {
+                            self.push_str(
+                                "let wave = wasm_wave::to_string(&Value::from(&res)).unwrap();\n",
+                            );
+                            self.push_str("assert_eq!(expected.unwrap(), wave);\n");
+                        } else {
+                            self.push_str("assert!(expected.is_none() && res == ());\n");
+                        }
+                        self.push_str("}\n");
+                        self.push_str("}\n");
+                    }
+                    self.push_str("_ => unreachable!(),\n");
+                    self.push_str("}\n");
+                    self.push_str("}\n");
+                    self.push_str("}\n");
                 }
                 Some(ProxyMode::RecordImport)
                     if trait_name == "exports::proxy::conversion::conversion::Guest" =>
@@ -1446,11 +1518,10 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                     } else {
                         self.src.push_str("let params: Vec<String> = Vec::new();\n");
                     }
-                    let display_name = format!("{display_interface}::{}", func.item_name());
                     self.src
                         .push_str("proxy::recorder::record::record_args(Some(\"");
                     self.src.push_str(&display_name);
-                    self.src.push_str("\"), &params.join(\", \"), ");
+                    self.src.push_str("\"), &params, ");
                     self.src.push_str(record_export);
                     self.src.push_str(");\n");
                     // call import functions
@@ -1491,17 +1562,19 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                         self.src.push_str(".await");
                     }
                     self.src.push_str(";\n");
-                    self.src.push_str(
-                        "let wave_res = wasm_wave::to_string(&Value::from(&res)).unwrap();\n",
-                    );
-                    self.src.push_str(&format!("proxy::recorder::record::record_ret(Some(\"{display_name}\"), &wave_res, {record_export});\n"));
                     if let Some(ty) = &func.result {
+                        self.src.push_str(
+                            "let wave_res = wasm_wave::to_string(&Value::from(&res)).unwrap();\n",
+                        );
+                        self.src.push_str(&format!("proxy::recorder::record::record_ret(Some(\"{display_name}\"), Some(&wave_res), {record_export});\n"));
                         match ty {
                             Type::Id(id) if self.info(*id).has_resource => {
                                 self.push_str("res.to_export()\n")
                             }
                             _ => self.push_str("res\n"),
                         }
+                    } else {
+                        self.src.push_str("proxy::recorder::record::record_ret(Some(\"{display_name}\"), None, {record_export});");
                     }
                     self.src.push_str("}\n");
                 }
@@ -2447,7 +2520,7 @@ fn to_export(self) -> Self::Output { self }
         self.push_str(&format!("fn from(value: {name}"));
         self.print_generics(mode.lifetime);
         self.push_str(") -> Self {\n");
-        self.push_str("use wasm_wave::{value::convert::ValueTyped, wasm::WasmValue};\n");
+        self.push_str("use wasm_wave::{wasm::WasmValue, value::convert::ValueTyped};\n");
         self.push_str(&format!("let ty = {name}::value_type();\n"));
         self.push_str("match value {\n");
         for (case_name, payload) in cases {
@@ -2459,10 +2532,29 @@ fn to_export(self) -> Self::Output { self }
             }
             self.push_str(" => {\n");
             self.push_str(&format!(
-                "crate::Value::make_enum(&ty, \"{case_name}\").unwrap()"
+                "crate::Value::make_enum(&ty, \"{case_name}\").unwrap()\n"
             ));
             self.push_str("}\n");
         }
+        self.push_str("}\n");
+        self.push_str("}\n");
+        self.push_str("}\n");
+
+        self.push_str("impl");
+        self.print_generics(mode.lifetime);
+        self.push_str(&format!(" wasm_wave::value::convert::ToRust for {name}"));
+        self.print_generics(mode.lifetime);
+        self.push_str(" {\n");
+        self.push_str("fn to_rust(value: &crate::Value) -> Self {\n");
+        self.push_str("use wasm_wave::{value::convert::ValueTyped, wasm::WasmValue};\n");
+        self.push_str("match value.unwrap_enum().as_ref() {\n");
+        for (case_name, payload) in cases {
+            self.push_str(&format!(
+                "\"{case_name}\" => {name}::{},\n",
+                case_name.to_upper_camel_case()
+            ));
+        }
+        self.push_str("_ => unreachable!(),\n");
         self.push_str("}\n");
         self.push_str("}\n");
         self.push_str("}\n");
