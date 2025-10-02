@@ -1360,21 +1360,28 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             let display_name = format!("{display_interface}::{}", func.item_name());
             match self.r#gen.opts.proxy_component {
                 Some(ProxyMode::ReplayImport) => {
+                    self.push_str(" {\n");
+                    self.push_str("use wasm_wave::value::convert::{ToRust, ValueTyped};\n");
+                    self.push_str("let args = vec![");
+                    for param in params.iter() {
+                        self.push_str(&format!(
+                            "wasm_wave::to_string(&Value::from(&{param})).unwrap(), "
+                        ));
+                    }
+                    self.push_str("];\n");
                     if let Some(ret_ty) = &func.result {
                         let ret_type = self.type_name_owned(ret_ty);
                         self.src.push_str(&format!(
-                            r#" {{
-use wasm_wave::value::convert::{{ToRust, ValueTyped}};
-let wave = proxy::recorder::replay::replay_import(Some("{display_name}"), None).unwrap();
+                            r#"let wave = proxy::recorder::replay::replay_import(Some("{display_name}"), Some(&args)).unwrap();
 let val: Value = wasm_wave::from_str(&{ret_type}::value_type(), &wave).unwrap();
-{ret_type}::to_rust(&val)
+val.to_rust()
 }}
 "#
                         ));
                     } else {
                         self.src.push_str(&format!(
                             r#" {{
-let wave = proxy::recorder::replay::replay_import(Some("{display_name}"), None);
+let wave = proxy::recorder::replay::replay_import(Some("{display_name}"), Some(&args));
 assert!(wave.is_none());
 }}
 "#
@@ -1433,7 +1440,7 @@ assert!(wave.is_none());
                         self.push_str(&format!("\"{name}\" => {{\n"));
                         for (idx, ty) in params.iter().enumerate() {
                             let arg = format!("arg{idx}");
-                            self.push_str(&format!("let {arg} = {ty}::to_rust(&wasm_wave::from_str(&{ty}::value_type(), &args[{idx}]).unwrap());\n"));
+                            self.push_str(&format!("let {arg} = wasm_wave::from_str::<crate::Value>(&{ty}::value_type(), &args[{idx}]).unwrap().to_rust();\n"));
                             args.push(arg);
                         }
                         self.push_str(&format!("let res = {path}({});\n", args.join(", ")));
@@ -2139,6 +2146,12 @@ assert!(wave.is_none());
         }
     }
 
+    fn generics(&mut self, lifetime: Option<&str>) -> String {
+        let old = mem::take(&mut self.src);
+        self.print_generics(lifetime);
+        String::from(mem::replace(&mut self.src, old))
+    }
+
     fn print_generics(&mut self, lifetime: Option<&str>) {
         if lifetime.is_none() {
             return;
@@ -2495,11 +2508,11 @@ fn to_export(self) -> Self::Output { self }
     ) where
         Self: Sized,
     {
+        let ty_name = format!("{}{}", name, self.generics(mode.lifetime));
         self.push_str("impl");
         self.print_generics(mode.lifetime);
         self.push_str(" wasm_wave::value::convert::ValueTyped for ");
-        self.push_str(name);
-        self.print_generics(mode.lifetime);
+        self.push_str(&ty_name);
         self.push_str(" {\n");
         self.push_str("fn value_type() -> crate::Type {\n");
         self.push_str("let cases = vec![");
@@ -2513,12 +2526,8 @@ fn to_export(self) -> Self::Output { self }
 
         self.push_str("impl");
         self.print_generics(mode.lifetime);
-        self.push_str(&format!(" From<{name}"));
-        self.print_generics(mode.lifetime);
-        self.push_str("> for crate::Value {\n");
-        self.push_str(&format!("fn from(value: {name}"));
-        self.print_generics(mode.lifetime);
-        self.push_str(") -> Self {\n");
+        self.push_str(&format!(" From<{ty_name}> for crate::Value {{\n"));
+        self.push_str(&format!("fn from(value: {ty_name}) -> Self {{\n"));
         self.push_str("use wasm_wave::{wasm::WasmValue, value::convert::ValueTyped};\n");
         self.push_str(&format!("let ty = {name}::value_type();\n"));
         self.push_str("match value {\n");
@@ -2541,12 +2550,12 @@ fn to_export(self) -> Self::Output { self }
 
         self.push_str("impl");
         self.print_generics(mode.lifetime);
-        self.push_str(&format!(" wasm_wave::value::convert::ToRust for {name}"));
-        self.print_generics(mode.lifetime);
-        self.push_str(" {\n");
-        self.push_str("fn to_rust(value: &crate::Value) -> Self {\n");
+        self.push_str(&format!(
+            " wasm_wave::value::convert::ToRust<{ty_name}> for crate::Value {{\n"
+        ));
+        self.push_str(&format!("fn to_rust(&self) -> {ty_name} {{\n"));
         self.push_str("use wasm_wave::{value::convert::ValueTyped, wasm::WasmValue};\n");
-        self.push_str("match value.unwrap_enum().as_ref() {\n");
+        self.push_str("match self.unwrap_enum().as_ref() {\n");
         for (case_name, payload) in cases {
             self.push_str(&format!(
                 "\"{case_name}\" => {name}::{},\n",
