@@ -1437,17 +1437,16 @@ assert!(wave.is_none());
                             args.push(arg);
                         }
                         self.push_str(&format!("let res = {path}({});\n", args.join(", ")));
-                        self.push_str(&format!("let expected = proxy::recorder::replay::assert_export_ret(Some(\"{display_name}\"));\n"));
-                        self.push_str("if let Some(expected) = expected {\n");
+                        let assert =
+                            format!("proxy::recorder::replay::assert_export_ret(Some(\"{name}\")");
                         if has_ret {
                             self.push_str(
                                 "let wave = wasm_wave::to_string(&Value::from(&res)).unwrap();\n",
                             );
-                            self.push_str("assert_eq!(expected.unwrap(), wave);\n");
+                            self.push_str(&format!("{assert}, Some(&wave));\n"));
                         } else {
-                            self.push_str("assert!(expected.is_none() && res == ());\n");
+                            self.push_str(&format!("{assert}, None);\n"));
                         }
-                        self.push_str("}\n");
                         self.push_str("}\n");
                     }
                     self.push_str("_ => unreachable!(),\n");
