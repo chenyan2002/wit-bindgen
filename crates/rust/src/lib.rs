@@ -1282,7 +1282,7 @@ impl WorldGenerator for RustWasm {
             }
             uwriteln!(self.src_preamble, "//   * proxy_component: {mode:?}");
             uwriteln!(self.src_preamble, "#[allow(unused_imports)]");
-            uwriteln!(self.src_preamble, "use wasm_wave::value::{{Value, Type}};");
+            uwriteln!(self.src_preamble, "use wasm_wave::{{wasm::WasmValue, value::{{Value, Type, convert::{{ToRust, ToValue, ValueTyped}}}}}};");
         }
         for opt in self.opts.async_.debug_opts() {
             uwriteln!(self.src_preamble, "//   * async: {opt}");
