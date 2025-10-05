@@ -1291,7 +1291,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                             path.join("::")
                         }
                         Some(ProxyMode::ReplayImport) | Some(ProxyMode::ReplayExport) => {
-                            "Stub".to_string()
+                            "MockResource".to_string()
                         }
                         None => "Stub".to_string(),
                     };
@@ -2405,16 +2405,23 @@ fn to_export(self) -> Self::Output { self }
                     .map(|(name, _docs, ty)| (name, ty)),
             );
             if self.r#gen.opts.proxy_component.is_some() {
-                /*self.print_rust_enum_wave(
-                mode,
-                &name,
-                cases
-                    .clone()
-                    .into_iter()
-                    .map(|(name, _docs, ty)| (name, ty)),
-                    false,
-                );*/
-                if self.in_import {
+                self.print_rust_enum_wave(
+                    mode,
+                    &name,
+                    &cases
+                        .clone()
+                        .into_iter()
+                        .map(|(name, _docs, ty)| (name, ty))
+                        .collect::<Vec<_>>(),
+                );
+                if self.in_import
+                    && self
+                        .r#gen
+                        .opts
+                        .proxy_component
+                        .as_ref()
+                        .is_some_and(|m| m.is_record())
+                {
                     let export_path = self
                         .get_proxy_path(ProxyPath::TypeId(id), true)
                         .map(|p| p.join("::"));
@@ -2508,7 +2515,6 @@ fn to_export(self) -> Self::Output { self }
         mode: TypeMode,
         name: &str,
         cases: &[(String, Option<&'b Type>)],
-        is_enum: bool,
     ) where
         Self: Sized,
     {
@@ -2521,10 +2527,18 @@ fn to_export(self) -> Self::Output { self }
         self.push_str("fn value_type() -> crate::Type {\n");
         self.push_str("let cases = vec![");
         for (case_name, payload) in cases {
-            self.push_str(&format!("\"{case_name}\", "));
+            self.push_str(&format!("(\"{case_name}\", "));
+            if let Some(payload) = payload {
+                self.push_str("Some(");
+                self.print_ty(payload, mode);
+                self.push_str("::value_type())");
+            } else {
+                self.push_str("None");
+            }
+            self.push_str("), ");
         }
         self.push_str("];\n");
-        self.push_str("crate::Type::enum_ty(cases).unwrap()\n");
+        self.push_str("crate::Type::variant(cases).unwrap()\n");
         self.push_str("}\n");
         self.push_str("}\n");
 
@@ -2544,30 +2558,49 @@ fn to_export(self) -> Self::Output { self }
             }
             self.push_str(" => {\n");
             self.push_str(&format!(
-                "crate::Value::make_enum(&ty, \"{case_name}\").unwrap()\n"
+                "crate::Value::make_variant(&ty, \"{case_name}\", "
             ));
+            if payload.is_some() {
+                self.push_str("Some(e.to_value())");
+            } else {
+                self.push_str("None");
+            }
+            self.push_str(").unwrap()\n");
             self.push_str("}\n");
         }
         self.push_str("}\n");
         self.push_str("}\n");
         self.push_str("}\n");
 
-        self.push_str("impl");
-        self.print_generics(mode.lifetime);
-        self.push_str(&format!(" crate::ToRust<{ty_name}> for crate::Value {{\n"));
-        self.push_str(&format!("fn to_rust(&self) -> {ty_name} {{\n"));
-        self.push_str("use crate::{ValueTyped, WasmValue};\n");
-        self.push_str("match self.unwrap_enum().as_ref() {\n");
-        for (case_name, payload) in cases {
-            self.push_str(&format!(
-                "\"{case_name}\" => {name}::{},\n",
-                case_name.to_upper_camel_case()
-            ));
+        if self
+            .r#gen
+            .opts
+            .proxy_component
+            .as_ref()
+            .is_some_and(|m| m.is_replay())
+        {
+            self.push_str("impl");
+            self.print_generics(mode.lifetime);
+            self.push_str(&format!(" crate::ToRust<{ty_name}> for crate::Value {{\n"));
+            self.push_str(&format!("fn to_rust(&self) -> {ty_name} {{\n"));
+            self.push_str("use crate::{ValueTyped, WasmValue};\n");
+            self.push_str("match self.unwrap_variant() {\n");
+            for (case_name, payload) in cases {
+                let rust_case = case_name.to_upper_camel_case();
+                if payload.is_some() {
+                    self.push_str(&format!("(ref case, Some(payload)) if case == \"{case_name}\" => {name}::{rust_case}(payload.to_rust())"));
+                } else {
+                    self.push_str(&format!(
+                        "(ref case, None) if case == \"{case_name}\" => {name}::{rust_case}"
+                    ));
+                }
+                self.push_str(",\n");
+            }
+            self.push_str("_ => unreachable!(),\n");
+            self.push_str("}\n");
+            self.push_str("}\n");
+            self.push_str("}\n");
         }
-        self.push_str("_ => unreachable!(),\n");
-        self.push_str("}\n");
-        self.push_str("}\n");
-        self.push_str("}\n");
     }
 
     fn print_rust_enum_debug<'b>(
@@ -2766,9 +2799,15 @@ fn to_export(self) -> Self::Output { self }
                     .iter()
                     .map(|c| (c.name.clone(), None))
                     .collect::<Vec<_>>(),
-                true,
             );
-            if self.in_import {
+            if self.in_import
+                && self
+                    .r#gen
+                    .opts
+                    .proxy_component
+                    .as_ref()
+                    .is_some_and(|m| m.is_record())
+            {
                 self.print_rust_enum_to_export(
                     false,
                     &None,
@@ -3106,15 +3145,22 @@ impl crate::ToValue for {camel} {{
     crate::Value::make_resource(&{camel}::value_type(), self.handle(), false).unwrap()
   }}
 }}
+"#
+                ));
+                if mode.is_replay() {
+                    self.push_str(&format!(
+                        r#"
 impl crate::ToRust<{camel}> for crate::Value {{
   fn to_rust(&self) -> {camel} {{
     use crate::WasmValue;
-    let (handle, _) = self.unwrap_resource();
-    unsafe {{ {camel}::from_handle(handle) }}
+    let (expect_handle, is_borrowed) = self.unwrap_resource();
+    assert!(!is_borrowed);
+    unsafe {{ {camel}::from_handle(expect_handle) }}
   }}
 }}
 "#
-                ));
+                    ));
+                }
                 if mode.is_record() {
                     let export_path = self.get_proxy_path(ProxyPath::TypeId(id), true);
                     if let Some(path) = export_path {
@@ -3314,22 +3360,32 @@ impl<'a> crate::ToValue for {camel}Borrow<'a> {{
     crate::Value::make_resource(&{camel}::value_type(), rep, true).unwrap()
   }}
 }}
+"#
+                ));
+                if mode.is_replay() {
+                    self.push_str(&format!(
+                        r#"
 impl crate::ToRust<{camel}> for crate::Value {{
   fn to_rust(&self) -> {camel} {{
     use crate::WasmValue;
-    let (handle, _) = self.unwrap_resource();
-    unsafe {{ {camel}::from_handle(handle) }}
+    let (expect_handle, is_borrowed) = self.unwrap_resource();
+    assert!(!is_borrowed);
+    let handle = {camel}::new(crate::MockResource);
+    assert_eq!(expect_handle, handle.handle());
+    handle
   }}
 }}
 impl<'a> crate::ToRust<{camel}Borrow<'a>> for crate::Value {{
   fn to_rust(&self) -> {camel}Borrow<'a> {{
     use crate::WasmValue;
-    let (rep, _) = self.unwrap_resource();
+    let (rep, is_borrowed) = self.unwrap_resource();
+    assert!(is_borrowed);
     unsafe {{ {camel}Borrow::lift(rep as usize) }}
   }}
 }}
 "#
-                ));
+                    ));
+                }
                 if mode.is_record() {
                     let import_path = self.get_proxy_path(ProxyPath::TypeId(id), false);
                     if let Some(path) = import_path {

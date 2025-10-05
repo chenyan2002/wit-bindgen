@@ -1585,6 +1585,14 @@ impl WorldGenerator for RustWasm {
 
         if self.opts.stubs {
             self.src.push_str("\n#[derive(Debug)]\npub struct Stub;\n");
+            if self
+                .opts
+                .proxy_component
+                .as_ref()
+                .is_some_and(|m| m.is_replay())
+            {
+                self.src.push_str("pub struct MockResource;\n");
+            }
         }
 
         let mut src = mem::take(&mut self.src);
