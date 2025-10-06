@@ -1380,7 +1380,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
                         let ret_type = self.type_name_owned(ret_ty);
                         self.src.push_str(&format!(
                             r#"let wave = proxy::recorder::replay::replay_import(Some("{display_name}"), Some(&args)).unwrap();
-let val: Value = wasm_wave::from_str(&{ret_type}::value_type(), &wave).unwrap();
+let val: Value = wasm_wave::from_str(&<{ret_type} as crate::ValueTyped>::value_type(), &wave).unwrap();
 val.to_rust()
 "#
                         ));
@@ -1444,7 +1444,7 @@ assert!(wave.is_none());
                         self.push_str(&format!("\"{name}\" => {{\n"));
                         for (idx, ty) in params.iter().enumerate() {
                             let arg = format!("arg{idx}");
-                            self.push_str(&format!("let {arg} = wasm_wave::from_str::<crate::Value>(&{ty}::value_type(), &args[{idx}]).unwrap().to_rust();\n"));
+                            self.push_str(&format!("let {arg} = wasm_wave::from_str::<crate::Value>(&<{ty} as crate::ValueTyped>::value_type(), &args[{idx}]).unwrap().to_rust();\n"));
                             args.push(arg);
                         }
                         self.push_str(&format!("let res = {path}({});\n", args.join(", ")));
@@ -2240,9 +2240,8 @@ assert!(wave.is_none());
                 self.push_str(&derives.into_iter().collect::<Vec<_>>().join(", "));
                 self.push_str(")]\n")
             }
-            self.push_str(&format!("pub struct {}", name));
-            self.print_generics(mode.lifetime);
-            self.push_str(" {\n");
+            let ty_name = format!("{}{}", name, self.generics(mode.lifetime));
+            self.push_str(&format!("pub struct {ty_name} {{\n"));
             for field in record.fields.iter() {
                 self.rustdoc(&field.docs);
                 self.push_str("pub ");
@@ -2257,8 +2256,7 @@ assert!(wave.is_none());
             self.push_str("impl");
             self.print_generics(mode.lifetime);
             self.push_str(" ::core::fmt::Debug for ");
-            self.push_str(&name);
-            self.print_generics(mode.lifetime);
+            self.push_str(&ty_name);
             self.push_str(" {\n");
             self.push_str(
                 "fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {\n",
@@ -2279,8 +2277,7 @@ assert!(wave.is_none());
                 self.push_str("impl");
                 self.print_generics(mode.lifetime);
                 self.push_str(" ::core::fmt::Display for ");
-                self.push_str(&name);
-                self.print_generics(mode.lifetime);
+                self.push_str(&ty_name);
                 self.push_str(" {\n");
                 self.push_str(
                     "fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {\n",
@@ -2295,35 +2292,105 @@ assert!(wave.is_none());
                 self.push_str(&name);
                 self.push_str(" {}\n");
             }
-            if self.r#gen.opts.proxy_component.is_some() && self.in_import {
-                let export_path = self.get_proxy_path(ProxyPath::TypeId(id), true);
+            if self.r#gen.opts.proxy_component.is_some() {
                 self.push_str("impl");
                 self.print_generics(mode.lifetime);
-                self.push_str(" crate::ToExport for ");
-                self.push_str(&name);
-                self.print_generics(mode.lifetime);
+                self.push_str(" crate::ValueTyped for ");
+                self.push_str(&ty_name);
                 self.push_str(" {\n");
-                if !info.has_resource || export_path.is_none() {
-                    self.push_str(
-                        r#"
+                self.push_str("fn value_type() -> crate::Type {\n");
+                self.push_str("let fields = vec![");
+                for field in record.fields.iter() {
+                    self.push_str(&format!("(\"{}\", <", field.name));
+                    let mode = self.filter_mode(&field.ty, mode);
+                    self.print_ty(&field.ty, mode);
+                    self.push_str(" as crate::ValueTyped>::value_type()), ");
+                }
+                self.push_str("];\n");
+                self.push_str("crate::Type::record(fields).unwrap()\n");
+                self.push_str("}\n");
+                self.push_str("}\n");
+
+                self.push_str("impl");
+                self.print_generics(mode.lifetime);
+                self.push_str(&format!(" crate::ToValue for {ty_name} {{\n"));
+                self.push_str(&format!("fn to_value(&self) -> crate::Value {{\n"));
+                self.push_str("use crate::{WasmValue, ValueTyped};\n");
+                self.push_str(&format!("let ty = {name}::value_type();\n"));
+                self.push_str("let fields = vec![");
+                for field in record.fields.iter() {
+                    self.push_str(&format!(
+                        "(\"{}\", self.{}.to_value()), ",
+                        field.name,
+                        to_rust_ident(&field.name)
+                    ));
+                }
+                self.push_str("];\n");
+                self.push_str("crate::Value::make_record(&ty, fields).unwrap()\n");
+                self.push_str("}\n");
+                self.push_str("}\n");
+                if self
+                    .r#gen
+                    .opts
+                    .proxy_component
+                    .as_ref()
+                    .is_some_and(|m| m.is_replay())
+                {
+                    self.push_str("impl");
+                    self.print_generics(mode.lifetime);
+                    self.push_str(&format!(" crate::ToRust<{ty_name}> for crate::Value {{\n"));
+                    self.push_str(&format!("fn to_rust(&self) -> {ty_name} {{\n"));
+                    self.push_str("use crate::{ValueTyped, WasmValue};\n");
+                    self.push_str("let fields: std::collections::HashMap<_, _> = self.unwrap_record().collect();\n");
+                    self.push_str(&format!("{name} {{\n"));
+                    for field in record.fields.iter() {
+                        self.push_str(&format!(
+                            "{}: fields[\"{}\"].to_rust(),\n",
+                            to_rust_ident(&field.name),
+                            field.name
+                        ));
+                    }
+                    self.push_str("}\n");
+                    self.push_str("}\n");
+                    self.push_str("}\n");
+                }
+                if self.in_import
+                    && self
+                        .r#gen
+                        .opts
+                        .proxy_component
+                        .as_ref()
+                        .is_some_and(|m| m.is_record())
+                {
+                    let export_path = self.get_proxy_path(ProxyPath::TypeId(id), true);
+                    self.push_str("impl");
+                    self.print_generics(mode.lifetime);
+                    self.push_str(" crate::ToExport for ");
+                    self.push_str(&name);
+                    self.print_generics(mode.lifetime);
+                    self.push_str(" {\n");
+                    if !info.has_resource || export_path.is_none() {
+                        self.push_str(
+                            r#"
 type Output = Self;
 fn to_export(self) -> Self::Output { self }
 }
 "#,
-                    );
-                    return;
+                        );
+                        return;
+                    }
+                    let export_path = export_path.as_ref().unwrap().join("::");
+                    self.push_str(&format!("type Output = crate::{export_path}::{name};\n"));
+                    self.push_str("fn to_export(self) -> Self::Output {\n");
+                    self.push_str("Self::Output {\n");
+                    for field in record.fields.iter() {
+                        let field_name = to_rust_ident(&field.name);
+                        self.push_str(&format!("{field_name}: self.{field_name}.to_export(),\n"));
+                    }
+                    self.push_str("}\n");
+                    self.push_str("}\n");
+                    self.push_str("}\n");
                 }
-                let export_path = export_path.as_ref().unwrap().join("::");
-                self.push_str(&format!("type Output = crate::{export_path}::{name};\n"));
-                self.push_str("fn to_export(self) -> Self::Output {\n");
-                self.push_str("Self::Output {\n");
-                for field in record.fields.iter() {
-                    let field_name = to_rust_ident(&field.name);
-                    self.push_str(&format!("{field_name}: self.{field_name}.to_export(),\n"));
-                }
-                self.push_str("}\n");
-                self.push_str("}\n");
-                self.push_str("}\n");
             }
         }
     }
@@ -2529,9 +2596,9 @@ fn to_export(self) -> Self::Output { self }
         for (case_name, payload) in cases {
             self.push_str(&format!("(\"{case_name}\", "));
             if let Some(payload) = payload {
-                self.push_str("Some(");
+                self.push_str("Some(<");
                 self.print_ty(payload, mode);
-                self.push_str("::value_type())");
+                self.push_str(" as crate::ValueTyped>::value_type())");
             } else {
                 self.push_str("None");
             }
