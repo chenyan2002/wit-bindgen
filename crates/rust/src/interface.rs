@@ -2366,8 +2366,7 @@ assert!(wave.is_none());
                     self.push_str("impl");
                     self.print_generics(mode.lifetime);
                     self.push_str(" crate::ToExport for ");
-                    self.push_str(&name);
-                    self.print_generics(mode.lifetime);
+                    self.push_str(&ty_name);
                     self.push_str(" {\n");
                     if !info.has_resource || export_path.is_none() {
                         self.push_str(
@@ -3206,10 +3205,21 @@ impl<'a> wit_bindgen_core::InterfaceGenerator<'a> for InterfaceGenerator<'a> {
     crate::Type::resource("{name}", false)
   }}
 }}
+impl crate::ValueTyped for &{camel} {{
+  fn value_type() -> crate::Type {{
+    crate::Type::resource("{name}", true)
+  }}
+}}
 impl crate::ToValue for {camel} {{
   fn to_value(&self) -> crate::Value {{
     use crate::{{ValueTyped, WasmValue}};
     crate::Value::make_resource(&{camel}::value_type(), self.handle(), false).unwrap()
+  }}
+}}
+impl crate::ToValue for &{camel} {{
+  fn to_value(&self) -> crate::Value {{
+    use crate::{{ValueTyped, WasmValue}};
+    crate::Value::make_resource(&<&{camel}>::value_type(), self.handle(), true).unwrap()
   }}
 }}
 "#
@@ -3235,13 +3245,19 @@ impl crate::ToRust<{camel}> for crate::Value {{
                         let path = path.join("::");
                         uwriteln!(
                             self.src,
-                            r#"
-impl crate::ToExport for {camel} {{
+                            r#"impl crate::ToExport for {camel} {{
   type Output = crate::{path}::{camel};
   fn to_export(self) -> Self::Output {{
     Self::Output::new(self)
   }}
-}}"#
+}}
+impl<'a> crate::ToExport for &'a {camel} {{
+  type Output = crate::{path}::{camel}Borrow<'a>;
+  fn to_export(self) -> Self::Output {{
+    unsafe {{ Self::Output::lift(self as *const _ as usize) }}
+  }}
+}}
+"#
                         );
                     } else {
                         // import-only module
@@ -3423,8 +3439,8 @@ impl crate::ToValue for {camel} {{
 impl<'a> crate::ToValue for {camel}Borrow<'a> {{
   fn to_value(&self) -> crate::Value {{
     use crate::{{ValueTyped, WasmValue}};
-    let rep = unsafe {{ *self.as_ptr::<u32>() }}.unwrap();
-    crate::Value::make_resource(&{camel}::value_type(), rep, true).unwrap()
+    let rep = self.rep as u32;
+    crate::Value::make_resource(&{camel}Borrow::value_type(), rep, true).unwrap()
   }}
 }}
 "#
@@ -3438,7 +3454,8 @@ impl crate::ToRust<{camel}> for crate::Value {{
     let (expect_handle, is_borrowed) = self.unwrap_resource();
     assert!(!is_borrowed);
     let handle = {camel}::new(crate::MockResource);
-    assert_eq!(expect_handle, handle.handle());
+    // Assertion will hold after https://github.com/WebAssembly/component-model/issues/395 lands on wac
+    // assert_eq!(expect_handle, handle.handle());
     handle
   }}
 }}
