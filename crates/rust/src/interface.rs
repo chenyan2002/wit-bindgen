@@ -1509,9 +1509,11 @@ assert!(wave.is_none());
                     } else {
                         (params.as_slice(), func.params.as_slice())
                     };
-                    self.push_str(
-                        "#[allow(unused_mut)]\nlet mut params: Vec<String> = Vec::new();\n",
-                    );
+                    if call_params.is_empty() {
+                        self.push_str("let params: Vec<String> = Vec::new();\n");
+                    } else {
+                        self.push_str("let mut params: Vec<String> = Vec::new();\n");
+                    }
                     call_params
                         .iter()
                         .zip(is_borrowed)
