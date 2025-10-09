@@ -2067,3 +2067,14 @@ fn full_wit_type_name(resolve: &Resolve, id: TypeId) -> String {
         None => type_def.name.clone().unwrap(),
     }
 }
+pub fn is_borrow_handle(resolve: &Resolve, ty: &Type) -> bool {
+    if let Type::Id(id) = ty {
+        let id = dealias(resolve, *id);
+        matches!(
+            resolve.types[id].kind,
+            TypeDefKind::Handle(Handle::Borrow(_))
+        )
+    } else {
+        false
+    }
+}

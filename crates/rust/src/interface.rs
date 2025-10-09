@@ -1,7 +1,8 @@
 use crate::bindgen::{FunctionBindgen, POINTER_SIZE_EXPRESSION};
 use crate::{
-    full_wit_type_name, int_repr, to_rust_ident, to_upper_camel_case, wasm_type, FnSig, Identifier,
-    InterfaceName, Ownership, ProxyMode, RuntimeItem, RustFlagsRepr, RustWasm, TypeGeneration,
+    full_wit_type_name, int_repr, is_borrow_handle, to_rust_ident, to_upper_camel_case, wasm_type,
+    FnSig, Identifier, InterfaceName, Ownership, ProxyMode, RuntimeItem, RustFlagsRepr, RustWasm,
+    TypeGeneration,
 };
 use anyhow::Result;
 use heck::*;
@@ -1257,7 +1258,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             None => String::new(),
         };
         if let Some(resource) = &resource {
-            res.push_str(".");
+            res.push_str("/");
             res.push_str(resource);
         }
         res
@@ -1357,7 +1358,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             self.src.push_str("#[allow(unused_variables)]\n");
             let (params, _) = self.print_signature(func, true, &sig);
             let func_name = to_rust_ident(&func.item_name());
-            let display_name = format!("{display_interface}::{}", func.item_name());
+            let display_name = format!("{display_interface}.{}", func.item_name());
             match self.r#gen.opts.proxy_component {
                 Some(ProxyMode::ReplayImport) => {
                     self.push_str(" {\n");
@@ -1414,7 +1415,7 @@ assert!(wave.is_none());
                                 .map(|id| self.resolve.types[id].name.clone().unwrap());
                             let mut display_func =
                                 self.display_interface(Some(id), resource.clone());
-                            display_func.push_str("::");
+                            display_func.push_str(".");
                             display_func.push_str(&func.item_name());
                             let mut module_path = crate::compute_module_path(
                                 &WorldKey::Interface(id),
@@ -1425,10 +1426,28 @@ assert!(wave.is_none());
                                 module_path.push(resource.to_upper_camel_case());
                             }
                             module_path.push(to_rust_ident(func.item_name()));
+                            let old = mem::take(&mut self.src);
+                            let (_, is_borrowed) = self.print_signature(func, false, &sig);
+                            self.src = old;
                             let params: Vec<_> = func
                                 .params
                                 .iter()
-                                .map(|(_, ty)| self.type_name_owned(ty))
+                                .zip(is_borrowed.iter())
+                                .map(|((_, ty), is_borrow)| {
+                                    let owned_ty = if is_borrow_handle(&self.resolve, ty) {
+                                        // Avoid getting the Borrow<'_> type
+                                        let mode = self.type_mode_for(
+                                            ty,
+                                            TypeOwnershipStyle::OnlyTopBorrowed,
+                                            "'_",
+                                        );
+                                        let ty = self.type_name(ty, mode);
+                                        ty.strip_prefix("&").unwrap().to_owned()
+                                    } else {
+                                        self.type_name_owned(ty)
+                                    };
+                                    (owned_ty, *is_borrow)
+                                })
                                 .collect();
                             func_names.push((
                                 display_func,
@@ -1442,10 +1461,14 @@ assert!(wave.is_none());
                     for (name, path, params, has_ret) in func_names {
                         let mut args = Vec::new();
                         self.push_str(&format!("\"{name}\" => {{\n"));
-                        for (idx, ty) in params.iter().enumerate() {
+                        for (idx, (ty, is_borrow)) in params.into_iter().enumerate() {
                             let arg = format!("arg{idx}");
-                            self.push_str(&format!("let {arg} = wasm_wave::from_str::<crate::Value>(&<{ty} as crate::ValueTyped>::value_type(), &args[{idx}]).unwrap().to_rust();\n"));
-                            args.push(arg);
+                            self.push_str(&format!("let {arg}: {ty} = wasm_wave::from_str::<crate::Value>(&<{ty} as crate::ValueTyped>::value_type(), &args[{idx}]).unwrap().to_rust();\n"));
+                            if is_borrow {
+                                args.push(format!("&{arg}"));
+                            } else {
+                                args.push(arg);
+                            }
                         }
                         self.push_str(&format!("let res = {path}({});\n", args.join(", ")));
                         let assert =
@@ -1475,12 +1498,9 @@ assert!(wave.is_none());
                 Some(ProxyMode::RecordImport) | Some(ProxyMode::RecordExport) => {
                     self.src.push_str(" {\n");
                     // align export and import arguments
-                    self.src.push_str("/* import signature: ");
-                    // The real intend is to get is_borrowed in the import signature, but the side effect is
-                    // that it also generates the signature in self.src
-                    // To work around that, we wrap this code inside a comment region.
+                    let old = mem::take(&mut self.src);
                     let (_, is_borrowed) = self.print_signature(func, false, &sig);
-                    self.src.push_str("*/\n");
+                    self.src = old;
                     let (call_params, call_ty) = if matches!(
                         func.kind,
                         FunctionKind::Method(_) | FunctionKind::AsyncMethod(_)
@@ -1501,8 +1521,7 @@ assert!(wave.is_none());
                             if let Type::Id(id) = ty {
                                 let info = self.info(*id);
                                 if info.has_resource {
-                                    let id = dealias(&self.resolve, *id);
-                                    if let TypeDefKind::Handle(Handle::Borrow(_)) = self.resolve.types[id].kind {
+                                    if is_borrow_handle(&self.resolve, ty) {
                                         self.push_str(&format!("{arg}.to_import();\n"));
                                         // Import borrow uses the ToValue trait for &T, but `arg.to_value()` calls to T, due to the auto-deref feature in method dispatch.
                                         // To avoid auto-deref, we need to use ToValue::to_value here.
@@ -3455,7 +3474,7 @@ impl<'a> crate::ToValue for {camel}Borrow<'a> {{
 impl crate::ToRust<{camel}> for crate::Value {{
   fn to_rust(&self) -> {camel} {{
     use crate::WasmValue;
-    let (expect_handle, is_borrowed) = self.unwrap_resource();
+    let (_expect_handle, is_borrowed) = self.unwrap_resource();
     assert!(!is_borrowed);
     let handle = {camel}::new(crate::MockResource);
     // Assertion will hold after https://github.com/WebAssembly/component-model/issues/395 lands on wac
