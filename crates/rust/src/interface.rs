@@ -1489,45 +1489,48 @@ assert!(wave.is_none());
                     } else {
                         (params.as_slice(), func.params.as_slice())
                     };
-                    let call_args = call_params
+                    self.push_str(
+                        "#[allow(unused_mut)]\nlet mut params: Vec<String> = Vec::new();\n",
+                    );
+                    call_params
                         .iter()
                         .zip(is_borrowed)
                         .zip(call_ty)
-                        .map(|((arg, is_borrowed), (_, ty))| {
+                        .for_each(|((arg, is_borrowed), (_, ty))| {
+                            self.push_str(&format!("let {arg} = "));
                             if let Type::Id(id) = ty {
                                 let info = self.info(*id);
                                 if info.has_resource {
-                                    if info.has_borrow_handle {
-                                        return format!("{arg}.to_import()");
+                                    let id = dealias(&self.resolve, *id);
+                                    if let TypeDefKind::Handle(Handle::Borrow(_)) = self.resolve.types[id].kind {
+                                        self.push_str(&format!("{arg}.to_import();\n"));
+                                        // Import borrow uses the ToValue trait for &T, but `arg.to_value()` calls to T, due to the auto-deref feature in method dispatch.
+                                        // To avoid auto-deref, we need to use ToValue::to_value here.
+                                        // Note that auto-deref works fine with inner &T types. Only the top-level borrow type.
+                                        // For other cases, we want to use arg.to_value to simplify the codegen, otherwise, we need to impl &Vec<T>, &String, etc.
+                                        self.src.push_str(&format!("params.push(wasm_wave::to_string(&ToValue::to_value(&{arg})).unwrap());\n"));
+                                        return;
                                     } else {
-                                        return format!("{arg}.to_import_owned()");
+                                        self.push_str(&format!("{arg}.to_import_owned();\n"));
+                                        self.src.push_str(&format!("params.push(wasm_wave::to_string(&{arg}.to_value()).unwrap());\n"));
+                                        return;
                                     }
                                 }
                             }
                             if is_borrowed {
-                                format!("&{arg}")
+                                self.push_str(&format!("&{arg}"));
                             } else {
-                                arg.to_string()
+                                self.push_str(arg);
                             }
-                        })
-                        .collect::<Vec<_>>();
+                            self.push_str(";\n");
+                            self.src.push_str(&format!("params.push(wasm_wave::to_string(&{arg}.to_value()).unwrap());\n"));
+                        });
                     // record
                     let record_export = match self.r#gen.opts.proxy_component {
                         Some(crate::ProxyMode::RecordExport) => "true",
                         Some(crate::ProxyMode::RecordImport) => "false",
                         _ => unreachable!(),
                     };
-                    if !call_params.is_empty() {
-                        self.src
-                            .push_str("let mut params: Vec<String> = Vec::new();\n");
-                        for param in call_params {
-                            self.src.push_str(&format!(
-                            "params.push(wasm_wave::to_string(&{param}.to_value()).unwrap());\n"
-                        ));
-                        }
-                    } else {
-                        self.src.push_str("let params: Vec<String> = Vec::new();\n");
-                    }
                     self.src
                         .push_str("proxy::recorder::record::record_args(Some(\"");
                     self.src.push_str(&display_name);
@@ -1559,13 +1562,13 @@ assert!(wave.is_none());
                         }
                         self.src.push_str(&func_name);
                         self.src.push_str("(");
-                        self.src.push_str(&call_args.join(", "));
+                        self.src.push_str(&call_params.join(", "));
                         self.src.push_str(")");
                     } else {
                         self.src.push_str(&import_path);
                         self.src.push_str(&to_rust_ident(func.item_name()));
                         self.src.push_str("(");
-                        self.src.push_str(&call_args.join(", "));
+                        self.src.push_str(&call_params.join(", "));
                         self.src.push_str(")");
                     }
                     if async_ {
@@ -3216,7 +3219,7 @@ impl crate::ToValue for {camel} {{
     crate::Value::make_resource(&{camel}::value_type(), self.handle(), false).unwrap()
   }}
 }}
-impl crate::ToValue for &{camel} {{
+impl<'a> crate::ToValue for &'a {camel} {{
   fn to_value(&self) -> crate::Value {{
     use crate::{{ValueTyped, WasmValue}};
     crate::Value::make_resource(&<&{camel}>::value_type(), self.handle(), true).unwrap()
@@ -3439,6 +3442,7 @@ impl crate::ToValue for {camel} {{
 impl<'a> crate::ToValue for {camel}Borrow<'a> {{
   fn to_value(&self) -> crate::Value {{
     use crate::{{ValueTyped, WasmValue}};
+    //let rep = self.get::<{camel}>().handle();
     let rep = self.rep as u32;
     crate::Value::make_resource(&{camel}Borrow::value_type(), rep, true).unwrap()
   }}
