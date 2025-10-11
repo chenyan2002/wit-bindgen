@@ -1360,6 +1360,23 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             let func_name = to_rust_ident(&func.item_name());
             let display_name = format!("{display_interface}.{}", func.item_name());
             match self.r#gen.opts.proxy_component {
+                Some(ProxyMode::ReplayImport)
+                    if trait_name == "exports::proxy::conversion::conversion::Guest" =>
+                {
+                    assert!(func_name.starts_with("get_"));
+                    let ret_ty = func.result.unwrap();
+                    let resource = self.type_name_owned(&ret_ty);
+                    self.src.push_str(&format!(
+                        r#" {{
+let res = {resource}::new(crate::MockResource);
+let ptr = res.as_ptr::<crate::MockResource>() as u32;
+crate::TABLE.with(|map| map.borrow_mut().insert(ptr, handle));
+res
+}}
+"#
+                    ));
+                    continue;
+                }
                 Some(ProxyMode::ReplayImport) => {
                     self.push_str(" {\n");
                     self.push_str("let args = vec![");
@@ -3249,14 +3266,15 @@ impl<'a> crate::ToValue for &'a {camel} {{
 "#
                 ));
                 if mode.is_replay() {
+                    let func_name = to_rust_ident(name);
                     self.push_str(&format!(
                         r#"
 impl crate::ToRust<{camel}> for crate::Value {{
   fn to_rust(&self) -> {camel} {{
     use crate::WasmValue;
-    let (expect_handle, is_borrowed) = self.unwrap_resource();
-    assert!(!is_borrowed);
-    unsafe {{ {camel}::from_handle(expect_handle) }}
+    let (handle, _is_borrowed) = self.unwrap_resource();
+    //assert!(!is_borrowed);
+    crate::proxy::conversion::conversion::get_{func_name}(handle)
   }}
 }}
 "#
@@ -3273,12 +3291,6 @@ impl crate::ToRust<{camel}> for crate::Value {{
   type Output = crate::{path}::{camel};
   fn to_export(self) -> Self::Output {{
     Self::Output::new(self)
-  }}
-}}
-impl<'a> crate::ToExport for &'a {camel} {{
-  type Output = crate::{path}::{camel}Borrow<'a>;
-  fn to_export(self) -> Self::Output {{
-    unsafe {{ Self::Output::lift(self as *const _ as usize) }}
   }}
 }}
 "#
@@ -3402,7 +3414,7 @@ impl {camel} {{
         let _ = unsafe {{ {box_path}::from_raw(handle as *mut _{camel}Rep<T>) }};
     }}
 
-    fn as_ptr<T: Guest{camel}>(&self) -> *mut _{camel}Rep<T> {{
+    pub(crate) fn as_ptr<T: Guest{camel}>(&self) -> *mut _{camel}Rep<T> {{
        {camel}::type_guard::<T>();
        T::_resource_rep(self.handle()).cast()
     }}
@@ -3454,44 +3466,51 @@ impl<'a> crate::ValueTyped for {camel}Borrow<'a> {{
     crate::Type::resource("{name}", true)
   }}
 }}
-impl crate::ToValue for {camel} {{
-  fn to_value(&self) -> crate::Value {{
-    use crate::{{ValueTyped, WasmValue}};
-    crate::Value::make_resource(&{camel}::value_type(), self.handle(), false).unwrap()
-  }}
-}}
-impl<'a> crate::ToValue for {camel}Borrow<'a> {{
-  fn to_value(&self) -> crate::Value {{
-    use crate::{{ValueTyped, WasmValue}};
-    //let rep = self.get::<{camel}>().handle();
-    let rep = self.rep as u32;
-    crate::Value::make_resource(&{camel}Borrow::value_type(), rep, true).unwrap()
-  }}
-}}
 "#
                 ));
                 if mode.is_replay() {
+                    assert!(matches!(mode, ProxyMode::ReplayImport));
                     self.push_str(&format!(
                         r#"
 impl crate::ToRust<{camel}> for crate::Value {{
   fn to_rust(&self) -> {camel} {{
     use crate::WasmValue;
-    let (_expect_handle, is_borrowed) = self.unwrap_resource();
+    let (expect_handle, is_borrowed) = self.unwrap_resource();
     assert!(!is_borrowed);
     let handle = {camel}::new(crate::MockResource);
+    let ptr = handle.as_ptr::<crate::MockResource>() as u32;
+    crate::TABLE.with(|map| map.borrow_mut().insert(ptr, expect_handle));
     // Assertion will hold after https://github.com/WebAssembly/component-model/issues/395 lands on wac
     // assert_eq!(expect_handle, handle.handle());
     handle
   }}
 }}
-impl<'a> crate::ToRust<{camel}Borrow<'a>> for crate::Value {{
-  fn to_rust(&self) -> {camel}Borrow<'a> {{
-    use crate::WasmValue;
-    let (rep, is_borrowed) = self.unwrap_resource();
-    assert!(is_borrowed);
-    unsafe {{ {camel}Borrow::lift(rep as usize) }}
+impl crate::ToValue for {camel} {{
+  fn to_value(&self) -> crate::Value {{
+    use crate::{{ValueTyped, WasmValue}};
+    let ptr = self.as_ptr::<crate::MockResource>() as u32;
+    let handle = crate::TABLE.with(|map| map.borrow().get(&ptr).unwrap().clone());
+    crate::Value::make_resource(&{camel}::value_type(), handle, false).unwrap()
   }}
 }}
+impl<'a> crate::ToValue for {camel}Borrow<'a> {{
+  fn to_value(&self) -> crate::Value {{
+    use crate::{{ValueTyped, WasmValue}};
+    //let rep = self.get::<crate::MockResource>().handle();
+    let rep = self.rep as u32;
+    let handle = crate::TABLE.with(|map| map.borrow().get(&rep).unwrap().clone());
+    crate::Value::make_resource(&{camel}Borrow::value_type(), handle, true).unwrap()
+  }}
+}}
+// May not be needed, as borrow type cannot go across component boundary
+/*impl<'a> crate::ToRust<{camel}Borrow<'a>> for crate::Value {{
+  fn to_rust(&self) -> {camel}Borrow<'a> {{
+    use crate::WasmValue;
+    let (handle, is_borrowed) = self.unwrap_resource();
+    assert!(is_borrowed);
+    unsafe {{ {camel}Borrow::lift(handle as usize) }}
+  }}
+}}*/
 "#
                     ));
                 }
@@ -3502,6 +3521,12 @@ impl<'a> crate::ToRust<{camel}Borrow<'a>> for crate::Value {{
                         uwriteln!(
                             self.src,
                             r#"
+impl crate::ToValue for {camel} {{
+  fn to_value(&self) -> crate::Value {{
+    use crate::{{ValueTyped, WasmValue}};
+    crate::Value::make_resource(&{camel}::value_type(), self.handle(), false).unwrap()
+  }}
+}}
 impl<'a> crate::ToImport<'a> for {camel} {{
   type Output = crate::{path}::{camel};
   fn to_import_owned(self) -> Self::Output {{

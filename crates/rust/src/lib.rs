@@ -1585,13 +1585,17 @@ impl WorldGenerator for RustWasm {
 
         if self.opts.stubs {
             self.src.push_str("\n#[derive(Debug)]\npub struct Stub;\n");
-            if self
-                .opts
-                .proxy_component
-                .as_ref()
-                .is_some_and(|m| m.is_replay())
-            {
-                self.src.push_str("pub struct MockResource;\n");
+            if matches!(self.opts.proxy_component, Some(ProxyMode::ReplayImport)) {
+                self.src.push_str(
+                    r#"#[derive(Debug)]
+pub struct MockResource;
+use std::collections::BTreeMap;
+use std::cell::RefCell;
+thread_local! {
+  static TABLE: RefCell<BTreeMap<u32, u32>> = RefCell::new(BTreeMap::new());
+}
+"#,
+                );
             }
         }
 
