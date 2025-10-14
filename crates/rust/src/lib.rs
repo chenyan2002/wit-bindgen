@@ -496,6 +496,16 @@ where Inner: ToExport {
         self.map(|x| x.to_export())
     }
 }
+impl<'a, Inner> ToImport<'a> for Option<Inner>
+where Inner: ToImport<'a> {
+    type Output = Option<Inner::Output>;
+    fn to_import(&'a self) -> &'a Self::Output {
+        self.as_ref().map(|x| x.to_import())
+    }
+    fn to_import_owned(self) -> Self::Output {
+        self.map(|x| x.to_import_owned())
+    }
+}
 macro_rules! impl_to_import_export_for_primitive {
     ($($t:ty),*) => {
         $(
@@ -635,6 +645,15 @@ impl crate::ToExport for String {
     fn to_export(self) -> Self::Output {
         self
     }
+}
+impl<'a> crate::ToImport<'a> for String {
+  type Output = String;
+  fn to_import(&'a self) -> &'a Self::Output {
+    self
+  }
+  fn to_import_owned(self) -> Self::Output {
+    self
+  }
 }
 "#,
                     );
@@ -2058,7 +2077,7 @@ impl std::error::Error for MissingWith {}
 // ```")
 
 /// Returns the full WIT type name with fully qualified interface name
-fn full_wit_type_name(resolve: &Resolve, id: TypeId) -> String {
+pub fn full_wit_type_name(resolve: &Resolve, id: TypeId) -> String {
     let id = dealias(resolve, id);
     let type_def = &resolve.types[id];
     let interface_name = match type_def.owner {

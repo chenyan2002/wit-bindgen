@@ -1537,6 +1537,9 @@ assert!(wave.is_none());
                         .zip(call_ty)
                         .for_each(|((arg, is_borrowed), (_, ty))| {
                             self.push_str(&format!("let {arg} = "));
+                            if is_borrowed {
+                                self.push_str("&");
+                            }
                             if let Type::Id(id) = ty {
                                 let info = self.info(*id);
                                 if info.has_resource {
@@ -1555,12 +1558,7 @@ assert!(wave.is_none());
                                     }
                                 }
                             }
-                            if is_borrowed {
-                                self.push_str(&format!("&{arg}"));
-                            } else {
-                                self.push_str(arg);
-                            }
-                            self.push_str(";\n");
+                            self.push_str(&format!("{arg};\n"));
                             self.src.push_str(&format!("params.push(wasm_wave::to_string(&{arg}.to_value()).unwrap());\n"));
                         });
                     // record
@@ -2395,41 +2393,79 @@ assert!(wave.is_none());
                     self.push_str("}\n");
                     self.push_str("}\n");
                 }
-                if self.in_import
-                    && self
-                        .r#gen
-                        .opts
-                        .proxy_component
-                        .as_ref()
-                        .is_some_and(|m| m.is_record())
+                if self
+                    .r#gen
+                    .opts
+                    .proxy_component
+                    .as_ref()
+                    .is_some_and(|m| m.is_record())
                 {
-                    let export_path = self.get_proxy_path(ProxyPath::TypeId(id), true);
-                    self.push_str("impl");
-                    self.print_generics(mode.lifetime);
-                    self.push_str(" crate::ToExport for ");
-                    self.push_str(&ty_name);
-                    self.push_str(" {\n");
-                    if !info.has_resource || export_path.is_none() {
-                        self.push_str(
-                            r#"
+                    if self.in_import {
+                        let export_path = self.get_proxy_path(ProxyPath::TypeId(id), true);
+                        self.push_str("impl");
+                        self.print_generics(mode.lifetime);
+                        self.push_str(" crate::ToExport for ");
+                        self.push_str(&ty_name);
+                        self.push_str(" {\n");
+                        if !info.has_resource || export_path.is_none() {
+                            self.push_str(
+                                r#"
 type Output = Self;
 fn to_export(self) -> Self::Output { self }
 }
 "#,
-                        );
-                        return;
+                            );
+                            return;
+                        }
+                        let export_path = export_path.as_ref().unwrap().join("::");
+                        self.push_str(&format!("type Output = crate::{export_path}::{ty_name};\n"));
+                        self.push_str("fn to_export(self) -> Self::Output {\n");
+                        self.push_str("Self::Output {\n");
+                        for field in record.fields.iter() {
+                            let field_name = to_rust_ident(&field.name);
+                            self.push_str(&format!(
+                                "{field_name}: self.{field_name}.to_export(),\n"
+                            ));
+                        }
+                        self.push_str("}\n");
+                        self.push_str("}\n");
+                        self.push_str("}\n");
+                    } else {
+                        let export_path = self.get_proxy_path(ProxyPath::TypeId(id), false);
+                        let generic = if mode.lifetime.is_none() {
+                            "<'a>".to_string()
+                        } else {
+                            self.generics(mode.lifetime)
+                        };
+                        self.push_str(&format!(
+                            "impl{generic} crate::ToImport{generic} for {ty_name} {{\n"
+                        ));
+                        if !info.has_resource || export_path.is_none() {
+                            self.push_str(
+                                r#"
+type Output = Self;
+fn to_import_owned(self) -> Self::Output { self }
+fn to_import(&'a self) -> &'a Self::Output { self }
+}
+"#,
+                            );
+                            return;
+                        }
+                        let export_path = export_path.as_ref().unwrap().join("::");
+                        self.push_str(&format!("type Output = crate::{export_path}::{ty_name};\n"));
+                        self.push_str("fn to_import_owned(self) -> Self::Output {\n");
+                        self.push_str("Self::Output {\n");
+                        for field in record.fields.iter() {
+                            let field_name = to_rust_ident(&field.name);
+                            self.push_str(&format!(
+                                "{field_name}: self.{field_name}.to_import_owned(),\n"
+                            ));
+                        }
+                        self.push_str("}\n");
+                        self.push_str("}\n");
+                        self.push_str("fn to_import(&'a self) -> &'a Self::Output { todo!() }\n");
+                        self.push_str("}\n");
                     }
-                    let export_path = export_path.as_ref().unwrap().join("::");
-                    self.push_str(&format!("type Output = crate::{export_path}::{name};\n"));
-                    self.push_str("fn to_export(self) -> Self::Output {\n");
-                    self.push_str("Self::Output {\n");
-                    for field in record.fields.iter() {
-                        let field_name = to_rust_ident(&field.name);
-                        self.push_str(&format!("{field_name}: self.{field_name}.to_export(),\n"));
-                    }
-                    self.push_str("}\n");
-                    self.push_str("}\n");
-                    self.push_str("}\n");
                 }
             }
         }
@@ -2581,11 +2617,11 @@ fn to_export(self) -> Self::Output { self }
         name: &str,
         cases: impl IntoIterator<Item = (String, Option<&'b Type>)>,
     ) {
+        let ty_name = format!("{}{}", name, self.generics(mode.lifetime));
         self.push_str("impl");
         self.print_generics(mode.lifetime);
         self.push_str(" crate::ToExport for ");
-        self.push_str(name);
-        self.print_generics(mode.lifetime);
+        self.push_str(&ty_name);
         self.push_str(" {\n");
         if !has_resource || export_path.is_none() {
             self.push_str(
@@ -2597,7 +2633,7 @@ fn to_export(self) -> Self::Output { self }
             return;
         }
         let export_path = export_path.as_ref().unwrap();
-        self.push_str(&format!("type Output = crate::{export_path}::{name};\n"));
+        self.push_str(&format!("type Output = crate::{export_path}::{ty_name};\n"));
         self.push_str("fn to_export(self) -> Self::Output {\n");
         self.push_str("match self {\n");
         for (case_name, payload) in cases {
@@ -3266,7 +3302,8 @@ impl<'a> crate::ToValue for &'a {camel} {{
 "#
                 ));
                 if mode.is_replay() {
-                    let func_name = to_rust_ident(name);
+                    //let wit_name = crate::full_wit_type_name(&self.resolve, id);
+                    let func_name = to_rust_ident(&name);
                     self.push_str(&format!(
                         r#"
 impl crate::ToRust<{camel}> for crate::Value {{
@@ -3283,7 +3320,6 @@ impl crate::ToRust<{camel}> for crate::Value {{
                 if mode.is_record() {
                     let export_path = self.get_proxy_path(ProxyPath::TypeId(id), true);
                     if let Some(path) = export_path {
-                        // No ToExport for borrow type, as return is always owned
                         let path = path.join("::");
                         uwriteln!(
                             self.src,
@@ -3291,6 +3327,12 @@ impl crate::ToRust<{camel}> for crate::Value {{
   type Output = crate::{path}::{camel};
   fn to_export(self) -> Self::Output {{
     Self::Output::new(self)
+  }}
+}}
+impl<'a> crate::ToExport for &'a {camel} {{
+  type Output = crate::{path}::{camel}Borrow<'a>;
+  fn to_export(self) -> Self::Output {{
+    unsafe {{ Self::Output::lift(self as *const _ as usize) }}
   }}
 }}
 "#
@@ -3302,7 +3344,8 @@ impl crate::ToRust<{camel}> for crate::Value {{
                         let path = crate::compute_module_path(&iface_name, self.resolve, false);
                         if !path[0].starts_with("wrapped_") {
                             let path = path.join("::");
-                            let func_name = to_rust_ident(name);
+                            //let wit_name = crate::full_wit_type_name(&self.resolve, id);
+                            let func_name = to_rust_ident(&name);
                             uwriteln!(
                                 self.src,
                                 r#"
@@ -3525,6 +3568,13 @@ impl crate::ToValue for {camel} {{
   fn to_value(&self) -> crate::Value {{
     use crate::{{ValueTyped, WasmValue}};
     crate::Value::make_resource(&{camel}::value_type(), self.handle(), false).unwrap()
+  }}
+}}
+impl<'a> crate::ToValue for {camel}Borrow<'a> {{
+  fn to_value(&self) -> crate::Value {{
+    use crate::{{ValueTyped, WasmValue}};
+    type T = crate::{path}::{camel};
+    crate::Value::make_resource(&{camel}Borrow::value_type(), self.get::<T>().handle(), true).unwrap()
   }}
 }}
 impl<'a> crate::ToImport<'a> for {camel} {{
