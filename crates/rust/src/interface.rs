@@ -1263,6 +1263,18 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
         }
         res
     }
+    fn display_func(&self, interface: &str, func: &Function) -> String {
+        let func_name = func.item_name();
+        let name = format!("{interface}.{func_name}");
+        if matches!(
+            func.kind,
+            FunctionKind::Method(_) | FunctionKind::AsyncMethod(_)
+        ) {
+            format!("[method]{name}")
+        } else {
+            name
+        }
+    }
 
     pub fn generate_stub<'a>(
         &mut self,
@@ -1358,7 +1370,7 @@ unsafe fn call_import(_params: Self::ParamsLower, _results: *mut u8) -> u32 {{
             self.src.push_str("#[allow(unused_variables)]\n");
             let (params, _) = self.print_signature(func, true, &sig);
             let func_name = to_rust_ident(&func.item_name());
-            let display_name = format!("{display_interface}.{}", func.item_name());
+            let display_name = self.display_func(display_interface, func);
             match self.r#gen.opts.proxy_component {
                 Some(ProxyMode::ReplayImport)
                     if trait_name == "exports::proxy::conversion::conversion::Guest" =>
@@ -1430,10 +1442,10 @@ assert!(wave.is_none());
                                 .kind
                                 .resource()
                                 .map(|id| self.resolve.types[id].name.clone().unwrap());
-                            let mut display_func =
-                                self.display_interface(Some(id), resource.clone());
-                            display_func.push_str(".");
-                            display_func.push_str(&func.item_name());
+                            let display_func = self.display_func(
+                                &self.display_interface(Some(id), resource.clone()),
+                                func,
+                            );
                             let mut module_path = crate::compute_module_path(
                                 &WorldKey::Interface(id),
                                 &self.resolve,
@@ -1518,18 +1530,22 @@ assert!(wave.is_none());
                     let old = mem::take(&mut self.src);
                     let (_, is_borrowed) = self.print_signature(func, false, &sig);
                     self.src = old;
-                    let (call_params, call_ty) = if matches!(
+                    let (call_params, call_ty, init_vec) = if matches!(
                         func.kind,
                         FunctionKind::Method(_) | FunctionKind::AsyncMethod(_)
                     ) {
-                        (&params[1..], &func.params[1..])
+                        (
+                            &params[1..],
+                            &func.params[1..],
+                            "vec![wasm_wave::to_string(&ToValue::to_value(&self)).unwrap()]",
+                        )
                     } else {
-                        (params.as_slice(), func.params.as_slice())
+                        (params.as_slice(), func.params.as_slice(), "Vec::new()")
                     };
                     if call_params.is_empty() {
-                        self.push_str("let params: Vec<String> = Vec::new();\n");
+                        self.push_str(&format!("let params: Vec<String> = {init_vec};\n"));
                     } else {
-                        self.push_str("let mut params: Vec<String> = Vec::new();\n");
+                        self.push_str(&format!("let mut params: Vec<String> = {init_vec};\n"));
                     }
                     call_params
                         .iter()

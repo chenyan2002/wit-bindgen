@@ -500,7 +500,7 @@ impl<'a, Inner> ToImport<'a> for Option<Inner>
 where Inner: ToImport<'a> {
     type Output = Option<Inner::Output>;
     fn to_import(&'a self) -> &'a Self::Output {
-        self.as_ref().map(|x| x.to_import())
+        todo!()
     }
     fn to_import_owned(self) -> Self::Output {
         self.map(|x| x.to_import_owned())
@@ -1612,6 +1612,19 @@ use std::collections::BTreeMap;
 use std::cell::RefCell;
 thread_local! {
   static TABLE: RefCell<BTreeMap<u32, u32>> = RefCell::new(BTreeMap::new());
+}
+impl crate::ValueTyped for &MockResource {
+  fn value_type() -> crate::Type {
+    crate::Type::resource("resource", true)
+  }
+}
+impl crate::ToValue for &MockResource {
+  fn to_value(&self) -> crate::Value {
+    // TODO: figure out why the table entry doesn't exist
+    //let ptr = self as *const _ as u32;
+    //let handle = crate::TABLE.with(|map| map.borrow().get(&ptr).unwrap().clone());
+    crate::Value::make_resource(&Self::value_type(), 42, true).unwrap()
+  }
 }
 "#,
                 );
