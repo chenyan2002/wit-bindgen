@@ -474,10 +474,9 @@ trait ToExport {
     fn to_export(self) -> Self::Output;
 }
 #[allow(dead_code)]
-trait ToImport<'a> {
+trait ToImport {
     type Output;
-    fn to_import(&'a self) -> &'a Self::Output;
-    fn to_import_owned(self) -> Self::Output;
+    fn to_import(self) -> Self::Output;
 }
 impl<Ok, Err> ToExport for Result<Ok, Err>
 where Ok: ToExport, Err: ToExport {
@@ -496,25 +495,19 @@ where Inner: ToExport {
         self.map(|x| x.to_export())
     }
 }
-impl<'a, Inner> ToImport<'a> for Option<Inner>
-where Inner: ToImport<'a> {
+impl<Inner> ToImport for Option<Inner>
+where Inner: ToImport {
     type Output = Option<Inner::Output>;
-    fn to_import(&'a self) -> &'a Self::Output {
-        todo!()
-    }
-    fn to_import_owned(self) -> Self::Output {
-        self.map(|x| x.to_import_owned())
+    fn to_import(self) -> Self::Output {
+        self.map(|x| x.to_import())
     }
 }
 macro_rules! impl_to_import_export_for_primitive {
     ($($t:ty),*) => {
         $(
-            impl<'a> ToImport<'a> for $t {
+            impl ToImport for $t {
                 type Output = $t;
-                fn to_import(&'a self) -> &'a Self::Output {
-                    self
-                }
-                fn to_import_owned(self) -> Self::Output {
+                fn to_import(self) -> Self::Output {
                     self
                 }
             }
@@ -646,12 +639,15 @@ impl crate::ToExport for String {
         self
     }
 }
-impl<'a> crate::ToImport<'a> for String {
+impl crate::ToImport for String {
   type Output = String;
-  fn to_import(&'a self) -> &'a Self::Output {
+  fn to_import(self) -> Self::Output {
     self
   }
-  fn to_import_owned(self) -> Self::Output {
+}
+impl<'a> crate::ToImport for &'a str {
+  type Output = &'a str;
+  fn to_import(self) -> Self::Output {
     self
   }
 }

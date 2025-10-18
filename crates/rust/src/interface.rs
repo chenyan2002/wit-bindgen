@@ -1568,7 +1568,7 @@ assert!(wave.is_none());
                                         self.src.push_str(&format!("params.push(wasm_wave::to_string(&ToValue::to_value(&{arg})).unwrap());\n"));
                                         return;
                                     } else {
-                                        self.push_str(&format!("{arg}.to_import_owned();\n"));
+                                        self.push_str(&format!("{arg}.to_import();\n"));
                                         self.src.push_str(&format!("params.push(wasm_wave::to_string(&{arg}.to_value()).unwrap());\n"));
                                         return;
                                     }
@@ -2448,20 +2448,13 @@ fn to_export(self) -> Self::Output { self }
                         self.push_str("}\n");
                     } else {
                         let export_path = self.get_proxy_path(ProxyPath::TypeId(id), false);
-                        let generic = if mode.lifetime.is_none() {
-                            "<'a>".to_string()
-                        } else {
-                            self.generics(mode.lifetime)
-                        };
-                        self.push_str(&format!(
-                            "impl{generic} crate::ToImport{generic} for {ty_name} {{\n"
-                        ));
+                        let generic = self.generics(mode.lifetime);
+                        self.push_str(&format!("impl{generic} crate::ToImport for {ty_name} {{\n"));
                         if !info.has_resource || export_path.is_none() {
                             self.push_str(
                                 r#"
 type Output = Self;
-fn to_import_owned(self) -> Self::Output { self }
-fn to_import(&'a self) -> &'a Self::Output { self }
+fn to_import(self) -> Self::Output { self }
 }
 "#,
                             );
@@ -2469,17 +2462,16 @@ fn to_import(&'a self) -> &'a Self::Output { self }
                         }
                         let export_path = export_path.as_ref().unwrap().join("::");
                         self.push_str(&format!("type Output = crate::{export_path}::{ty_name};\n"));
-                        self.push_str("fn to_import_owned(self) -> Self::Output {\n");
+                        self.push_str("fn to_import(self) -> Self::Output {\n");
                         self.push_str("Self::Output {\n");
                         for field in record.fields.iter() {
                             let field_name = to_rust_ident(&field.name);
                             self.push_str(&format!(
-                                "{field_name}: self.{field_name}.to_import_owned(),\n"
+                                "{field_name}: self.{field_name}.to_import(),\n"
                             ));
                         }
                         self.push_str("}\n");
                         self.push_str("}\n");
-                        self.push_str("fn to_import(&'a self) -> &'a Self::Output { todo!() }\n");
                         self.push_str("}\n");
                     }
                 }
@@ -2496,7 +2488,7 @@ fn to_import(&'a self) -> &'a Self::Output { self }
             variant
                 .cases
                 .iter()
-                .map(|c| (c.name.to_upper_camel_case(), &c.docs, c.ty.as_ref())),
+                .map(|c| (c.name.clone(), &c.docs, c.ty.as_ref())),
             docs,
         );
     }
@@ -2544,7 +2536,7 @@ fn to_import(&'a self) -> &'a Self::Output { self }
             self.push_str(" {\n");
             for (case_name, docs, payload) in cases.clone() {
                 self.rustdoc(docs);
-                self.push_str(&case_name);
+                self.push_str(&case_name.to_upper_camel_case());
                 if let Some(ty) = payload {
                     self.push_str("(");
                     let mode = self.filter_mode(ty, mode);
@@ -2561,7 +2553,7 @@ fn to_import(&'a self) -> &'a Self::Output { self }
                 cases
                     .clone()
                     .into_iter()
-                    .map(|(name, _docs, ty)| (name, ty)),
+                    .map(|(name, _docs, ty)| (name.to_upper_camel_case(), ty)),
             );
             if self.r#gen.opts.proxy_component.is_some() {
                 self.print_rust_enum_wave(
@@ -2592,7 +2584,7 @@ fn to_import(&'a self) -> &'a Self::Output { self }
                         cases
                             .clone()
                             .into_iter()
-                            .map(|(name, _docs, ty)| (name, ty)),
+                            .map(|(name, _docs, ty)| (name.to_upper_camel_case(), ty)),
                     );
                 }
             }
@@ -3330,6 +3322,13 @@ impl crate::ToRust<{camel}> for crate::Value {{
     crate::proxy::conversion::conversion::get_{func_name}(handle)
   }}
 }}
+impl<'a> crate::ToRust<&'a {camel}> for crate::Value {{
+  fn to_rust(&self) -> &'a {camel} {{
+    // This type shouldn't be reachable in replay mode
+    // Make it a placeholder to make Rust type system happy
+    unreachable!()
+  }}
+}}
 "#
                     ));
                 }
@@ -3365,13 +3364,10 @@ impl<'a> crate::ToExport for &'a {camel} {{
                             uwriteln!(
                                 self.src,
                                 r#"
-impl<'a> crate::ToImport<'a> for {camel} {{
+impl crate::ToImport for {camel} {{
   type Output = crate::wrapped_{path}::{camel};
-  fn to_import_owned(self) -> Self::Output {{
+  fn to_import(self) -> Self::Output {{
     crate::proxy::conversion::conversion::get_wrapped_{func_name}(self)
-  }}
-  fn to_import(&'a self) -> &'a Self::Output {{
-    todo!()
   }}
 }}
 "#
@@ -3561,15 +3557,15 @@ impl<'a> crate::ToValue for {camel}Borrow<'a> {{
     crate::Value::make_resource(&{camel}Borrow::value_type(), handle, true).unwrap()
   }}
 }}
-// May not be needed, as borrow type cannot go across component boundary
-/*impl<'a> crate::ToRust<{camel}Borrow<'a>> for crate::Value {{
+impl<'a> crate::ToRust<{camel}Borrow<'a>> for crate::Value {{
   fn to_rust(&self) -> {camel}Borrow<'a> {{
     use crate::WasmValue;
     let (handle, is_borrowed) = self.unwrap_resource();
     assert!(is_borrowed);
-    unsafe {{ {camel}Borrow::lift(handle as usize) }}
+    let rep = crate::TABLE.with(|map| map.borrow().iter().find(|(_, v)| **v == handle).unwrap().0.clone());
+    unsafe {{ {camel}Borrow::lift(rep as usize) }}
   }}
-}}*/
+}}
 "#
                     ));
                 }
@@ -3593,22 +3589,18 @@ impl<'a> crate::ToValue for {camel}Borrow<'a> {{
     crate::Value::make_resource(&{camel}Borrow::value_type(), self.get::<T>().handle(), true).unwrap()
   }}
 }}
-impl<'a> crate::ToImport<'a> for {camel} {{
+impl crate::ToImport for {camel} {{
   type Output = crate::{path}::{camel};
-  fn to_import_owned(self) -> Self::Output {{
+  fn to_import(self) -> Self::Output {{
     self.into_inner()
   }}
-  fn to_import(&'a self) -> &'a Self::Output {{
-    self.get()
-  }}
 }}
-impl<'a> crate::ToImport<'a> for {camel}Borrow<'a> {{
-  type Output = crate::{path}::{camel};
-  fn to_import(&'a self) -> &'a Self::Output {{
-    self.get()
-  }}
-  fn to_import_owned(self) -> Self::Output {{
-    unreachable!()
+impl<'a> crate::ToImport for {camel}Borrow<'a> {{
+  type Output = &'a crate::{path}::{camel};
+  fn to_import(self) -> Self::Output {{
+    type T = crate::{path}::{camel};
+    let ptr = unsafe {{ &mut *self.as_ptr::<T>() }};
+    ptr.as_ref().unwrap()
   }}
 }}
 "#
