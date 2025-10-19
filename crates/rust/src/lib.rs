@@ -488,6 +488,16 @@ where Ok: ToExport, Err: ToExport {
         }
     }
 }
+impl<Ok, Err> ToImport for Result<Ok, Err>
+where Ok: ToImport, Err: ToImport {
+    type Output = Result<Ok::Output, Err::Output>;
+    fn to_import(self) -> Self::Output {
+        match self {
+            Ok(ok) => Ok(ok.to_import()),
+            Err(err) => Err(err.to_import()),
+        }
+    }
+}
 impl<Inner> ToExport for Option<Inner>
 where Inner: ToExport {
     type Output = Option<Inner::Output>;
@@ -520,7 +530,7 @@ macro_rules! impl_to_import_export_for_primitive {
         )*
     };
 }
-impl_to_import_export_for_primitive!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, (), bool, char);
+impl_to_import_export_for_primitive!(u8, u16, u32, u64, i8, i16, i32, i64, usize, isize, f32, f64, (), bool, char);
 
 macro_rules! impl_to_import_export_for_tuple {
     ( $($T:ident, $i:tt),* ) => {
@@ -661,10 +671,16 @@ impl<'a> crate::ToImport for &'a str {
                 if self.opts.proxy_component.is_some() {
                     self.src.push_str(
                         r#"
-impl<T> crate::ToExport for Box::<T> where T: crate::ToExport + Clone {
+impl<T> crate::ToExport for Box::<T> where T: crate::ToExport {
     type Output = Box::<T::Output>;
     fn to_export(self) -> Self::Output {
-        Box::new((*self).clone().to_export())
+        Box::new((*self).to_export())
+    }
+}
+impl<T> crate::ToImport for Box::<T> where T: crate::ToImport {
+    type Output = Box::<T::Output>;
+    fn to_import(self) -> Self::Output {
+        Box::new((*self).to_import())
     }
 }
 "#,
@@ -681,6 +697,12 @@ impl<T: crate::ToExport> crate::ToExport for Vec::<T> {
     type Output = Vec::<T::Output>;
     fn to_export(self) -> Self::Output {
         self.into_iter().map(|x| x.to_export()).collect()
+    }
+}
+impl<T: crate::ToImport> crate::ToImport for Vec::<T> {
+    type Output = Vec::<T::Output>;
+    fn to_import(self) -> Self::Output {
+        self.into_iter().map(|x| x.to_import()).collect()
     }
 }
 "#,

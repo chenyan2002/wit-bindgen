@@ -2565,16 +2565,15 @@ fn to_import(self) -> Self::Output { self }
                         .map(|(name, _docs, ty)| (name, ty))
                         .collect::<Vec<_>>(),
                 );
-                if self.in_import
-                    && self
-                        .r#gen
-                        .opts
-                        .proxy_component
-                        .as_ref()
-                        .is_some_and(|m| m.is_record())
+                if self
+                    .r#gen
+                    .opts
+                    .proxy_component
+                    .as_ref()
+                    .is_some_and(|m| m.is_record())
                 {
                     let export_path = self
-                        .get_proxy_path(ProxyPath::TypeId(id), true)
+                        .get_proxy_path(ProxyPath::TypeId(id), self.in_import)
                         .map(|p| p.join("::"));
                     self.print_rust_enum_to_export(
                         info.has_resource,
@@ -2626,23 +2625,26 @@ fn to_import(self) -> Self::Output { self }
         cases: impl IntoIterator<Item = (String, Option<&'b Type>)>,
     ) {
         let ty_name = format!("{}{}", name, self.generics(mode.lifetime));
+        let (trait_name, func_name) = if self.in_import {
+            ("ToExport", "to_export")
+        } else {
+            ("ToImport", "to_import")
+        };
         self.push_str("impl");
         self.print_generics(mode.lifetime);
-        self.push_str(" crate::ToExport for ");
-        self.push_str(&ty_name);
-        self.push_str(" {\n");
+        self.push_str(&format!(" crate::{trait_name} for {ty_name} {{\n"));
         if !has_resource || export_path.is_none() {
-            self.push_str(
+            self.push_str(&format!(
                 r#"type Output = Self;
-fn to_export(self) -> Self::Output { self }
-}
-"#,
-            );
+fn {func_name}(self) -> Self::Output {{ self }}
+}}
+"#
+            ));
             return;
         }
         let export_path = export_path.as_ref().unwrap();
         self.push_str(&format!("type Output = crate::{export_path}::{ty_name};\n"));
-        self.push_str("fn to_export(self) -> Self::Output {\n");
+        self.push_str(&format!("fn {func_name}(self) -> Self::Output {{\n"));
         self.push_str("match self {\n");
         for (case_name, payload) in cases {
             self.push_str(&format!("{name}::{case_name}"));
@@ -2652,7 +2654,7 @@ fn to_export(self) -> Self::Output { self }
             self.push_str(" => {\n");
             self.push_str(&format!("Self::Output::{case_name}"));
             if payload.is_some() {
-                self.push_str("(e.to_export())");
+                self.push_str(&format!("(e.{func_name}())"));
             }
             self.push_str("}\n");
         }
@@ -3559,6 +3561,8 @@ impl<'a> crate::ToValue for {camel}Borrow<'a> {{
 }}
 impl<'a> crate::ToRust<{camel}Borrow<'a>> for crate::Value {{
   fn to_rust(&self) -> {camel}Borrow<'a> {{
+    // It's likely that this code is unreachable, because we cannot return borrowed resource.
+    // We provide an implementation anyway, just to make Rust type system happy.
     use crate::WasmValue;
     let (handle, is_borrowed) = self.unwrap_resource();
     assert!(is_borrowed);
