@@ -1559,19 +1559,17 @@ assert!(wave.is_none());
                             if let Type::Id(id) = ty {
                                 let info = self.info(*id);
                                 if info.has_resource {
+                                    self.push_str(&format!("{arg}.to_import();\n"));
                                     if is_borrow_handle(&self.resolve, ty) {
-                                        self.push_str(&format!("{arg}.to_import();\n"));
-                                        // Import borrow uses the ToValue trait for &T, but `arg.to_value()` calls to T, due to the auto-deref feature in method dispatch.
+                                        // Import borrow uses the ToValue trait for &T, but `arg.to_value()` calls T, due to the auto-deref feature in method dispatch.
                                         // To avoid auto-deref, we need to use ToValue::to_value here.
                                         // Note that auto-deref works fine with inner &T types. Only the top-level borrow type.
                                         // For other cases, we want to use arg.to_value to simplify the codegen, otherwise, we need to impl &Vec<T>, &String, etc.
                                         self.src.push_str(&format!("params.push(wasm_wave::to_string(&ToValue::to_value(&{arg})).unwrap());\n"));
-                                        return;
                                     } else {
-                                        self.push_str(&format!("{arg}.to_import();\n"));
                                         self.src.push_str(&format!("params.push(wasm_wave::to_string(&{arg}.to_value()).unwrap());\n"));
-                                        return;
                                     }
+                                    return;
                                 }
                             }
                             self.push_str(&format!("{arg};\n"));
