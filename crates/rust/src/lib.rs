@@ -25,6 +25,23 @@ struct InterfaceName {
     path: String,
 }
 
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+pub enum ProxyMode {
+    RecordImport,
+    RecordExport,
+    ReplayImport,
+    ReplayExport,
+}
+impl ProxyMode {
+    pub fn is_record(&self) -> bool {
+        matches!(self, ProxyMode::RecordImport | ProxyMode::RecordExport)
+    }
+    pub fn is_replay(&self) -> bool {
+        matches!(self, ProxyMode::ReplayImport | ProxyMode::ReplayExport)
+    }
+}
+
 #[derive(Default)]
 struct RustWasm {
     types: Types,
@@ -42,6 +59,7 @@ struct RustWasm {
     // Track which interfaces and types are generated. Remapped interfaces and types provided via `with`
     // are required to be used.
     generated_types: HashSet<String>,
+    proxy_import_only_interfaces: HashSet<InterfaceId>,
     world: Option<WorldId>,
 
     rt_module: IndexSet<RuntimeItem>,
@@ -270,6 +288,10 @@ pub struct Opts {
     #[cfg_attr(feature = "clap", arg(long))]
     pub disable_custom_section_link_helpers: bool,
 
+    /// Whether or not to generate a `proxy_component`.
+    #[cfg_attr(feature = "clap", clap(long))]
+    pub proxy_component: Option<ProxyMode>,
+
     #[cfg_attr(feature = "clap", clap(flatten))]
     #[cfg_attr(feature = "serde", serde(flatten))]
     pub async_: AsyncFilterSet,
@@ -414,6 +436,123 @@ impl RustWasm {
         Ok(remapped)
     }
 
+    fn proxy_interface(
+        &mut self,
+        resolve: &Resolve,
+        name: &WorldKey,
+        id: InterfaceId,
+        _files: &mut Files,
+    ) -> Result<()> {
+        // For each type in the interface, add a `with` mapping to reuse the
+        // corresponding import type in the export module
+        let mode = self.opts.proxy_component.as_ref().unwrap();
+        assert!(mode.is_record());
+        let import_path = compute_proxy_path(name, resolve, mode, false);
+        for (type_name, ty_id) in resolve.interfaces[id].types.iter() {
+            // Skip resource/handle types, including the nested resource types.
+            // We need both the import and export resource bindings to ensure correctness.
+            let info = self.types.get(*ty_id);
+            if info.has_resource {
+                continue;
+            }
+            let full_type_name = full_wit_type_name(resolve, *ty_id);
+            let mut rust_path = import_path.clone();
+            rust_path.push(to_upper_camel_case(type_name));
+            // TODO fix crate:: prefix
+            let rust_path = "crate::".to_owned() + &rust_path.join("::");
+            self.with
+                .insert(full_type_name, TypeGeneration::Remap(rust_path));
+        }
+        Ok(())
+    }
+    fn emit_proxy_traits(&mut self) {
+        self.src.push_str(
+            r#"
+#[allow(dead_code)]
+trait ToExport {
+    type Output;
+    fn to_export(self) -> Self::Output;
+}
+#[allow(dead_code)]
+trait ToImport {
+    type Output;
+    fn to_import(self) -> Self::Output;
+}
+impl<Ok, Err> ToExport for Result<Ok, Err>
+where Ok: ToExport, Err: ToExport {
+    type Output = Result<Ok::Output, Err::Output>;
+    fn to_export(self) -> Self::Output {
+        match self {
+            Ok(ok) => Ok(ok.to_export()),
+            Err(err) => Err(err.to_export()),
+        }
+    }
+}
+impl<Ok, Err> ToImport for Result<Ok, Err>
+where Ok: ToImport, Err: ToImport {
+    type Output = Result<Ok::Output, Err::Output>;
+    fn to_import(self) -> Self::Output {
+        match self {
+            Ok(ok) => Ok(ok.to_import()),
+            Err(err) => Err(err.to_import()),
+        }
+    }
+}
+impl<Inner> ToExport for Option<Inner>
+where Inner: ToExport {
+    type Output = Option<Inner::Output>;
+    fn to_export(self) -> Self::Output {
+        self.map(|x| x.to_export())
+    }
+}
+impl<Inner> ToImport for Option<Inner>
+where Inner: ToImport {
+    type Output = Option<Inner::Output>;
+    fn to_import(self) -> Self::Output {
+        self.map(|x| x.to_import())
+    }
+}
+macro_rules! impl_to_import_export_for_primitive {
+    ($($t:ty),*) => {
+        $(
+            impl ToImport for $t {
+                type Output = $t;
+                fn to_import(self) -> Self::Output {
+                    self
+                }
+            }
+            impl ToExport for $t {
+                type Output = $t;
+                fn to_export(self) -> Self::Output {
+                    self
+                }
+            }
+        )*
+    };
+}
+impl_to_import_export_for_primitive!(u8, u16, u32, u64, i8, i16, i32, i64, usize, isize, f32, f64, (), bool, char);
+
+macro_rules! impl_to_import_export_for_tuple {
+    ( $($T:ident, $i:tt),* ) => {
+        impl<$($T: ToExport),*> ToExport for ($($T,)*) {
+            type Output = ($($T::Output,)*);
+            fn to_export(self) -> Self::Output {
+                ($(self.$i.to_export(),)*)
+            }
+        }
+    };
+}
+impl_to_import_export_for_tuple!(T0, 0);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4, T5, 5);
+impl_to_import_export_for_tuple!(T0, 0, T1, 1, T2, 2, T3, 3, T4, 4, T5, 5, T6, 6);
+"#,
+        );
+    }
+
     fn finish_runtime_module(&mut self) {
         if !self.rt_module.is_empty() {
             // As above, disable rustfmt, as we use prettyplease.
@@ -501,14 +640,74 @@ pub mod wit_stream {{
             RuntimeItem::StringType => {
                 self.rt_module.insert(RuntimeItem::AllocCrate);
                 uwriteln!(self.src, "pub use alloc_crate::string::String;");
+                if self.opts.proxy_component.is_some() {
+                    self.src.push_str(
+                        r#"
+impl crate::ToExport for String {
+    type Output = String;
+    fn to_export(self) -> Self::Output {
+        self
+    }
+}
+impl crate::ToImport for String {
+  type Output = String;
+  fn to_import(self) -> Self::Output {
+    self
+  }
+}
+impl<'a> crate::ToImport for &'a str {
+  type Output = &'a str;
+  fn to_import(self) -> Self::Output {
+    self
+  }
+}
+"#,
+                    );
+                }
             }
             RuntimeItem::BoxType => {
                 self.rt_module.insert(RuntimeItem::AllocCrate);
                 uwriteln!(self.src, "pub use alloc_crate::boxed::Box;");
+                if self.opts.proxy_component.is_some() {
+                    self.src.push_str(
+                        r#"
+impl<T> crate::ToExport for Box::<T> where T: crate::ToExport {
+    type Output = Box::<T::Output>;
+    fn to_export(self) -> Self::Output {
+        Box::new((*self).to_export())
+    }
+}
+impl<T> crate::ToImport for Box::<T> where T: crate::ToImport {
+    type Output = Box::<T::Output>;
+    fn to_import(self) -> Self::Output {
+        Box::new((*self).to_import())
+    }
+}
+"#,
+                    );
+                }
             }
             RuntimeItem::VecType => {
                 self.rt_module.insert(RuntimeItem::AllocCrate);
                 uwriteln!(self.src, "pub use alloc_crate::vec::Vec;");
+                if self.opts.proxy_component.is_some() {
+                    self.src.push_str(
+                        r#"
+impl<T: crate::ToExport> crate::ToExport for Vec::<T> {
+    type Output = Vec::<T::Output>;
+    fn to_export(self) -> Self::Output {
+        self.into_iter().map(|x| x.to_export()).collect()
+    }
+}
+impl<T: crate::ToImport> crate::ToImport for Vec::<T> {
+    type Output = Vec::<T::Output>;
+    fn to_import(self) -> Self::Output {
+        self.into_iter().map(|x| x.to_import()).collect()
+    }
+}
+"#,
+                    );
+                }
             }
             RuntimeItem::CabiDealloc => {
                 self.rt_module.insert(RuntimeItem::StdAllocModule);
@@ -1059,6 +1258,69 @@ impl WorldGenerator for RustWasm {
                 "//   * disable_custom_section_link_helpers"
             );
         }
+        if let Some(mode) = &self.opts.proxy_component {
+            if !self.opts.stubs {
+                panic!("`proxy_component` requires `stubs` to be enabled");
+            }
+            let world = &resolve.worlds[world];
+            let mut imports: HashMap<_, _> = world
+                .imports
+                .iter()
+                .filter_map(|(_, item)| {
+                    if let WorldItem::Interface { id, .. } = item {
+                        let name = resolve.canonicalized_id_of(*id).unwrap();
+                        if name.starts_with("proxy:") {
+                            return None;
+                        }
+                        Some((name, *id))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            match mode {
+                ProxyMode::RecordImport | ProxyMode::RecordExport => {
+                    // check if all exports appear in the imports
+                    for (_, item) in world.exports.iter() {
+                        if let WorldItem::Interface { id, .. } = item {
+                            let name = resolve.canonicalized_id_of(*id).unwrap();
+                            if name.starts_with("proxy:") {
+                                continue;
+                            }
+                            let import_name = match mode {
+                                ProxyMode::RecordImport => {
+                                    name.strip_prefix("wrapped-").unwrap().to_owned()
+                                }
+                                ProxyMode::RecordExport => "wrapped-".to_string() + &name,
+                                _ => unreachable!(),
+                            };
+                            if imports.remove(&import_name).is_none() {
+                                panic!("{name} is only in the export, but not in the import");
+                            }
+                        }
+                    }
+                    // For export proxy, we can have more imports than exports due to transitive dependency.
+                    // Also the logging interface is always import only.
+                    match mode {
+                        ProxyMode::RecordImport => assert!(imports.is_empty()),
+                        ProxyMode::RecordExport => {
+                            self.proxy_import_only_interfaces = imports.into_values().collect();
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                ProxyMode::ReplayImport => {
+                    assert!(imports.is_empty());
+                }
+                ProxyMode::ReplayExport => {
+                    assert!(world.exports.len() == 1);
+                    self.proxy_import_only_interfaces = imports.into_values().collect();
+                }
+            }
+            uwriteln!(self.src_preamble, "//   * proxy_component: {mode:?}");
+            uwriteln!(self.src_preamble, "#[allow(unused_imports)]");
+            uwriteln!(self.src_preamble, "use wasm_wave::{{wasm::WasmValue, value::{{Value, Type, convert::{{ToRust, ToValue, ValueTyped}}}}}};");
+        }
         for opt in self.opts.async_.debug_opts() {
             uwriteln!(self.src_preamble, "//   * async: {opt}");
         }
@@ -1159,7 +1421,6 @@ impl WorldGenerator for RustWasm {
         for (name, ty_id) in resolve.interfaces[id].types.iter() {
             let full_name = full_wit_type_name(resolve, *ty_id);
             if let Some(type_gen) = self.with.get(&full_name) {
-                // skip type definition generation for remapped types
                 if type_gen.generated() {
                     to_define.push((name, ty_id));
                 }
@@ -1268,6 +1529,20 @@ impl WorldGenerator for RustWasm {
             // generate `struct`s for any imported resources.
             self.import_funcs(resolve, world, &[], files);
         }
+
+        if self
+            .opts
+            .proxy_component
+            .as_ref()
+            .is_some_and(|m| m.is_record())
+        {
+            let world = &resolve.worlds[world];
+            for (name, id) in world.exports.iter() {
+                if let WorldItem::Interface { id, .. } = id {
+                    self.proxy_interface(resolve, &name, *id, files).unwrap();
+                }
+            }
+        }
     }
 
     fn finish(&mut self, resolve: &Resolve, world: WorldId, files: &mut Files) -> Result<()> {
@@ -1280,6 +1555,9 @@ impl WorldGenerator for RustWasm {
 
         self.finish_runtime_module();
         self.finish_export_macro(resolve, world);
+        if self.opts.proxy_component.is_some() {
+            self.emit_proxy_traits();
+        }
 
         // This is a bit tricky, but we sometimes want to "split" the `world` in
         // two and only encode the imports here.
@@ -1344,6 +1622,31 @@ impl WorldGenerator for RustWasm {
 
         if self.opts.stubs {
             self.src.push_str("\n#[derive(Debug)]\npub struct Stub;\n");
+            if matches!(self.opts.proxy_component, Some(ProxyMode::ReplayImport)) {
+                self.src.push_str(
+                    r#"#[derive(Debug)]
+pub struct MockResource;
+use std::collections::BTreeMap;
+use std::cell::RefCell;
+thread_local! {
+  static TABLE: RefCell<BTreeMap<u32, u32>> = RefCell::new(BTreeMap::new());
+}
+impl crate::ValueTyped for &MockResource {
+  fn value_type() -> crate::Type {
+    crate::Type::resource("resource", true)
+  }
+}
+impl crate::ToValue for &MockResource {
+  fn to_value(&self) -> crate::Value {
+    // TODO: figure out why the table entry doesn't exist
+    //let ptr = self as *const _ as u32;
+    //let handle = crate::TABLE.with(|map| map.borrow().get(&ptr).unwrap().clone());
+    crate::Value::make_resource(&Self::value_type(), 42, true).unwrap()
+  }
+}
+"#,
+                );
+            }
         }
 
         let mut src = mem::take(&mut self.src);
@@ -1404,6 +1707,37 @@ fn compute_module_path(name: &WorldKey, resolve: &Resolve, is_export: bool) -> V
         }
     }
     path
+}
+pub(crate) fn compute_proxy_path(
+    name: &WorldKey,
+    resolve: &Resolve,
+    mode: &ProxyMode,
+    is_export: bool,
+) -> Vec<String> {
+    let mut path = crate::compute_module_path(&name, resolve, is_export);
+    match (mode, is_export) {
+        (ProxyMode::RecordImport, true) => path[1] = "wrapped_".to_string() + &path[1],
+        (ProxyMode::RecordImport, false) => {
+            if let Some(name) = path[0].strip_prefix("wrapped_") {
+                path[0] = name.to_string();
+            }
+        }
+        (ProxyMode::RecordExport, false) => path[0] = "wrapped_".to_string() + &path[0],
+        (ProxyMode::RecordExport, true) => {
+            if let Some(name) = path[1].strip_prefix("wrapped_") {
+                path[1] = name.to_string();
+            }
+        }
+        (_, _) => unreachable!(),
+    }
+    path
+}
+pub(crate) fn owner_of_type(id: TypeId, resolve: &Resolve) -> InterfaceId {
+    let owner = match resolve.types[id].owner {
+        TypeOwner::Interface(i) => i,
+        TypeOwner::World(_) | TypeOwner::None => unreachable!(),
+    };
+    owner
 }
 
 enum Identifier<'a> {
@@ -1774,7 +2108,7 @@ impl std::error::Error for MissingWith {}
 // ```")
 
 /// Returns the full WIT type name with fully qualified interface name
-fn full_wit_type_name(resolve: &Resolve, id: TypeId) -> String {
+pub fn full_wit_type_name(resolve: &Resolve, id: TypeId) -> String {
     let id = dealias(resolve, id);
     let type_def = &resolve.types[id];
     let interface_name = match type_def.owner {
@@ -1785,5 +2119,16 @@ fn full_wit_type_name(resolve: &Resolve, id: TypeId) -> String {
     match interface_name {
         Some(interface_name) => format!("{}/{}", interface_name, type_def.name.clone().unwrap()),
         None => type_def.name.clone().unwrap(),
+    }
+}
+pub fn is_borrow_handle(resolve: &Resolve, ty: &Type) -> bool {
+    if let Type::Id(id) = ty {
+        let id = dealias(resolve, *id);
+        matches!(
+            resolve.types[id].kind,
+            TypeDefKind::Handle(Handle::Borrow(_))
+        )
+    } else {
+        false
     }
 }
