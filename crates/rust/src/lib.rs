@@ -347,6 +347,24 @@ pub struct Opts {
     #[cfg_attr(feature = "clap", clap(flatten))]
     #[cfg_attr(feature = "serde", serde(flatten))]
     pub chainable_methods: ChainableMethodFilterSet,
+
+    /// Prefix prepended to the wasm import module of every imported
+    /// interface and world-level import, e.g. `"[p]"` turns
+    /// `#[link(wasm_import_module = "a:b/c")]` into `"[p]a:b/c"`.
+    ///
+    /// This covers functions, `[resource-drop]` of imported resources, and
+    /// their stream/future payload intrinsics. `[export]…` modules are
+    /// unchanged.
+    ///
+    /// Imports with a prefixed module are not component imports; whatever
+    /// consumes the core module (e.g. a `wit-component` mode that knows the
+    /// prefix) must satisfy them. Setting this therefore also suppresses the
+    /// `component-type` custom section for this world, along with its link
+    /// helpers.
+    ///
+    /// Library-only; not exposed on the CLI.
+    #[cfg_attr(feature = "clap", arg(skip))]
+    pub import_module_prefix: Option<String>,
 }
 
 impl Opts {
@@ -355,6 +373,27 @@ impl Opts {
         r.skip = self.skip.iter().cloned().collect();
         r.opts = self;
         r
+    }
+
+    /// Whether a `component-type` custom section (and its link helpers) is
+    /// emitted for this world. See [`Opts::import_module_prefix`].
+    fn emit_component_type_section(&self) -> bool {
+        self.import_module_prefix.is_none()
+    }
+
+    /// Whether the `__link_custom_section_describing_imports` helper exists
+    /// and should be referenced from generated modules.
+    fn emit_custom_section_link_helpers(&self) -> bool {
+        self.emit_component_type_section() && !self.disable_custom_section_link_helpers
+    }
+
+    /// The wasm import module for an imported item whose unprefixed module
+    /// name is `module`.
+    fn import_module(&self, module: &str) -> String {
+        match &self.import_module_prefix {
+            Some(prefix) => format!("{prefix}{module}"),
+            None => module.to_string(),
+        }
     }
 
     fn merge_structurally_equal_types(&self) -> bool {
@@ -959,7 +998,7 @@ macro_rules! __export_{world_name}_impl {{
         }
 
         // See comments in `finish` for why this conditionally happens here.
-        if self.opts.pub_export_macro {
+        if self.opts.pub_export_macro && self.opts.emit_component_type_section() {
             uwriteln!(self.src, "const _: () = {{");
             self.emit_custom_section(resolve, world_id, "imports and exports", None);
             uwriteln!(self.src, "}};");
@@ -1225,6 +1264,9 @@ impl WorldGenerator for RustWasm {
                 "//   * disable_custom_section_link_helpers"
             );
         }
+        if let Some(prefix) = &self.opts.import_module_prefix {
+            uwriteln!(self.src_preamble, "//   * import_module_prefix: {prefix:?}");
+        }
         for opt in self.opts.async_.debug_opts() {
             uwriteln!(self.src_preamble, "//   * sync: {opt}");
         }
@@ -1331,7 +1373,7 @@ impl WorldGenerator for RustWasm {
             self.generated_types.insert(full_name);
         }
 
-        let wasm_import_module = resolve.name_world_key(name);
+        let wasm_import_module = self.opts.import_module(&resolve.name_world_key(name));
         let mut r#gen = self.interface(
             Identifier::Interface(id, name),
             &wasm_import_module,
@@ -1365,7 +1407,9 @@ impl WorldGenerator for RustWasm {
     ) -> Result<()> {
         self.import_funcs_called = true;
 
-        let mut r#gen = self.interface(Identifier::World(world), "$root", resolve, true)?;
+        let wasm_import_module = self.opts.import_module("$root");
+        let mut r#gen =
+            self.interface(Identifier::World(world), &wasm_import_module, resolve, true)?;
 
         r#gen.generate_imports(funcs.iter().map(|(_, func)| *func), None);
 
@@ -1472,7 +1516,9 @@ impl WorldGenerator for RustWasm {
             }
             self.generated_types.insert(full_name);
         }
-        let mut r#gen = self.interface(Identifier::World(world), "$root", resolve, true)?;
+        let wasm_import_module = self.opts.import_module("$root");
+        let mut r#gen =
+            self.interface(Identifier::World(world), &wasm_import_module, resolve, true)?;
         for (name, ty) in to_define {
             r#gen.define_type(name, *ty);
         }
@@ -1557,16 +1603,18 @@ impl WorldGenerator for RustWasm {
         } else {
             (resolve, world)
         };
-        self.emit_custom_section(
-            resolve_to_encode,
-            world_to_encode,
-            "encoded world",
-            if self.opts.disable_custom_section_link_helpers {
-                None
-            } else {
-                Some("__link_custom_section_describing_imports")
-            },
-        );
+        if self.opts.emit_component_type_section() {
+            self.emit_custom_section(
+                resolve_to_encode,
+                world_to_encode,
+                "encoded world",
+                if self.opts.emit_custom_section_link_helpers() {
+                    Some("__link_custom_section_describing_imports")
+                } else {
+                    None
+                },
+            );
+        }
 
         if self.opts.stubs {
             self.src.push_str("\n#[derive(Debug)]\npub struct Stub;\n");

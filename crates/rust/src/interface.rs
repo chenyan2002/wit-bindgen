@@ -499,7 +499,7 @@ macro_rules! {macro_name} {{
         let docs = docs.trim_end();
 
         let path_to_root = self.path_to_root();
-        let used_static = if self.r#gen.opts.disable_custom_section_link_helpers {
+        let used_static = if !self.r#gen.opts.emit_custom_section_link_helpers() {
             String::new()
         } else {
             format!(
@@ -820,7 +820,8 @@ pub mod vtable{ordinal} {{
             return;
         }
 
-        self.generate_payloads("", func, interface);
+        let prefix = self.r#gen.opts.import_module("");
+        self.generate_payloads(&prefix, func, interface);
 
         let async_ = self.r#gen.is_async(self.resolve, interface, func, true);
         let mut sig = FnSig {
